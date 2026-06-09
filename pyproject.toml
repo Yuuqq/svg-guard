@@ -1,0 +1,36 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "svg-guard"
+version = "0.1.0"
+description = "Detect and auto-fix text overflow in SVG diagrams"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [{ name = "Yuuqq" }]
+keywords = ["svg", "overflow", "layout", "diagram", "check", "lint", "fix"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Multimedia :: Graphics :: Graphics Conversion",
+    "Topic :: Software Development :: Quality Assurance",
+]
+dependencies = [
+    "playwright>=1.40",
+]
+
+[project.scripts]
+svg-guard = "svg_guard.cli:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "pytest-playwright>=0.4"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/svg_guard"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
