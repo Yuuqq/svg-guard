@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from svg_guard.checker import check_svg, Issue
+from svg_guard.checker import check_svg
 
 FIXTURES = Path(__file__).parent / "fixtures"
 

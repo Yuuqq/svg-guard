@@ -1,11 +1,10 @@
 """Tests for the fixer module."""
 
-import tempfile
 from pathlib import Path
 
 import pytest
 
-from svg_guard.checker import Issue, check_svg
+from svg_guard.checker import check_svg
 from svg_guard.fixer import fix_svg
 
 FIXTURES = Path(__file__).parent / "fixtures"

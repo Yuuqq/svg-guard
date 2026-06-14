@@ -1,0 +1,3 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 200" width="300" height="200">
+  <text x="200" y="100" font-size="20" fill="#333">label past the right edge</text>
+</svg>

@@ -65,7 +65,8 @@ Auto-fix detected overflow issues.
 
 ### `svg-guard report`
 
-Generate an HTML report without checking.
+Check every SVG in the directory and render the results as a self-contained
+HTML report (runs the full check, then writes the report).
 
 | Flag | Default | Description |
 |------|---------|-------------|

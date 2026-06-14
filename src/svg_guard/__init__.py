@@ -2,5 +2,6 @@
 
 __version__ = "0.1.0"
 
-from .checker import check_svg, check_directory
-from .fixer import fix_svg
+from .checker import check_directory as check_directory
+from .checker import check_svg as check_svg
+from .fixer import fix_svg as fix_svg

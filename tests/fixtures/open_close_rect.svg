@@ -1,0 +1,4 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 200" width="400" height="200">
+  <rect x="50" y="40" width="150" height="60" fill="#fee2e2" rx="8"></rect>
+  <text x="60" y="75" font-size="20" fill="#333">A bit of overflow text here</text>
+</svg>

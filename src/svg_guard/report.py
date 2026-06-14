@@ -67,20 +67,22 @@ def generate_report(
         f'<div class="stat"><div class="stat-val">{total_files}</div>'
         f'<div class="stat-label">Files</div></div>',
         f'<div class="stat"><div class="stat-val {"ok" if files_with_issues == 0 else "bad"}">'
-        f"{files_with_issues}</div><div class=\"stat-label\">With Issues</div></div>",
+        f'{files_with_issues}</div><div class="stat-label">With Issues</div></div>',
         f'<div class="stat"><div class="stat-val {"ok" if total_issues == 0 else "bad"}">'
-        f"{total_issues}</div><div class=\"stat-label\">Issues</div></div>",
+        f'{total_issues}</div><div class="stat-label">Issues</div></div>',
         "</div></header>",
         "<main>",
     ]
 
     if total_issues == 0:
-        parts.append('<p class="empty">All SVG files passed — no overflow issues found.</p>')
+        parts.append(
+            '<p class="empty">All SVG files passed — no overflow issues found.</p>'
+        )
     else:
         for name, result in results.items():
             if result.ok:
                 continue
-            parts.append(f'<div class="file-card">')
+            parts.append('<div class="file-card">')
             parts.append(f'<div class="file-name">{html.escape(name)}</div>')
             parts.append(
                 f'<div class="file-issues">'
@@ -88,7 +90,8 @@ def generate_report(
             )
             for issue in result.issues:
                 dir_class = (
-                    "text-overflow" if "viewbox" not in issue.direction
+                    "text-overflow"
+                    if "viewbox" not in issue.direction
                     else "viewbox-overflow"
                 )
                 parts.append(

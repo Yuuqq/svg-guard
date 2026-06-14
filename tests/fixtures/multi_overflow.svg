@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 200" width="600" height="200">
+  <rect x="50" y="30" width="200" height="140" fill="#fee2e2" rx="8"/>
+  <text x="55" y="75" font-size="20" fill="#333">First label text overflowing right</text>
+  <text x="55" y="125" font-size="20" fill="#333">Second label also overflowing right</text>
+</svg>

@@ -22,7 +22,6 @@ JS_DETECT = r"""
 
   const allRects = [...svg.querySelectorAll('rect')];
   const boxes = [];
-  let largeIdx = 0;
 
   for (let i = 0; i < allRects.length; i++) {
     const rect = allRects[i];
@@ -47,7 +46,6 @@ JS_DETECT = r"""
         class: rect.getAttribute('class') || ''
       }
     });
-    largeIdx++;
   }
 
   const pad = 3;
@@ -68,14 +66,30 @@ JS_DETECT = r"""
 
     if (!parent) {
       const edgePad = 4;
-      if (bbox.x < sr.x + edgePad || bbox.x + bbox.width > sr.x + sr.width - edgePad ||
-          bbox.y < sr.y + edgePad || bbox.y + bbox.height > sr.y + sr.height - edgePad) {
+      const oL = bbox.x < sr.x + edgePad;
+      const oR = bbox.x + bbox.width > sr.x + sr.width - edgePad;
+      const oT = bbox.y < sr.y + edgePad;
+      const oB = bbox.y + bbox.height > sr.y + sr.height - edgePad;
+      if (oL || oR || oT || oB) {
+        const dirs = [];
+        if (oL) dirs.push('left');
+        if (oR) dirs.push('right');
+        if (oT) dirs.push('top');
+        if (oB) dirs.push('bottom');
         results.push({
           type: 'text_viewbox',
           text: txt.textContent.trim().substring(0, 80),
-          direction: 'viewbox',
+          direction: dirs.join('+'),
           svg: _r({ x: (bbox.x - sr.x) * scaleX, y: (bbox.y - sr.y) * scaleY,
-                    w: bbox.width * scaleX, h: bbox.height * scaleY })
+                    w: bbox.width * scaleX, h: bbox.height * scaleY }),
+          parent: { viewBox: { w: Math.round(svgW), h: Math.round(svgH) } },
+          fix: {
+            // Right/bottom overflow can be fixed by enlarging the canvas.
+            expand_viewbox_w: oR
+              ? Math.round((bbox.x + bbox.width - sr.x) * scaleX - svgW + 4) : 0,
+            expand_viewbox_h: oB
+              ? Math.round((bbox.y + bbox.height - sr.y) * scaleY - svgH + 4) : 0
+          }
         });
       }
       continue;
@@ -159,22 +173,22 @@ JS_DETECT = r"""
 
 @dataclass
 class Issue:
-    type: str          # 'text_rect' | 'rect_viewbox' | 'text_viewbox'
+    type: str  # 'text_rect' | 'rect_viewbox' | 'text_viewbox'
     text: str
-    direction: str     # e.g. 'right+bottom' or 'viewbox+bottom'
-    svg: dict          # {x, y, w, h} in SVG coordinate space
-    parent: dict       # parent rect info or viewBox
+    direction: str  # e.g. 'right+bottom' or 'viewbox+bottom'
+    svg: dict  # {x, y, w, h} in SVG coordinate space
+    parent: dict  # parent rect info or viewBox
     fix: dict = field(default_factory=dict)
 
     @classmethod
     def from_raw(cls, raw: dict) -> Issue:
         return cls(
-            type=raw['type'],
-            text=raw['text'],
-            direction=raw['direction'],
-            svg=raw['svg'],
-            parent=raw.get('parent', {}),
-            fix=raw.get('fix', {}),
+            type=raw["type"],
+            text=raw["text"],
+            direction=raw["direction"],
+            svg=raw["svg"],
+            parent=raw.get("parent", {}),
+            fix=raw.get("fix", {}),
         )
 
 
@@ -262,8 +276,10 @@ def check_directory(
         browser.close()
 
     print(f"\n{'=' * 60}")
-    print(f"Checked {len(svg_files)} files, found {total_issues} issues "
-          f"in {sum(1 for r in results.values() if not r.ok)} files.")
+    print(
+        f"Checked {len(svg_files)} files, found {total_issues} issues "
+        f"in {sum(1 for r in results.values() if not r.ok)} files."
+    )
 
     if json_out:
         out_path = Path(json_out)

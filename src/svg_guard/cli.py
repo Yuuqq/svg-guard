@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import argparse
-import json
 import sys
-from pathlib import Path
 
 
 def main(argv: list[str] | None = None) -> None:
+    from . import __version__
+
     parser = argparse.ArgumentParser(
         prog="svg-guard",
         description="Detect and fix text overflow in SVG diagrams.",
+    )
+    parser.add_argument(
+        "--version", action="version", version=f"svg-guard {__version__}"
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -20,9 +23,7 @@ def main(argv: list[str] | None = None) -> None:
     p_check.add_argument("--dir", default=".", help="Directory containing SVG files")
     p_check.add_argument("--verbose", "-v", action="store_true")
     p_check.add_argument("--json", dest="json_out", help="Write JSON report")
-    p_check.add_argument(
-        "--html", dest="html_out", help="Write HTML visual report"
-    )
+    p_check.add_argument("--html", dest="html_out", help="Write HTML visual report")
 
     # ── fix ────────────────────────────────────────────────
     p_fix = sub.add_parser("fix", help="Auto-fix overflow issues")
@@ -43,12 +44,17 @@ def main(argv: list[str] | None = None) -> None:
 
     args = parser.parse_args(argv)
 
-    if args.command == "check":
-        _cmd_check(args)
-    elif args.command == "fix":
-        _cmd_fix(args)
-    elif args.command == "report":
-        _cmd_report(args)
+    try:
+        if args.command == "check":
+            _cmd_check(args)
+        elif args.command == "fix":
+            _cmd_fix(args)
+        elif args.command == "report":
+            _cmd_report(args)
+    except FileNotFoundError as e:
+        # Library callers still get the exception; CLI users get a clean message.
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(2)
 
 
 def _cmd_check(args: argparse.Namespace) -> None:
