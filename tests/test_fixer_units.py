@@ -12,10 +12,11 @@ import pytest
 
 from svg_guard.checker import check_svg
 from svg_guard.fixer import (
+    _expand_viewbox,
     _fix_card,
     _parse_len,
-    _replace_root_svg_attr,
     _safe_backup,
+    _sync_root_svg_dim,
     fix_svg,
 )
 
@@ -55,32 +56,89 @@ def test_parse_len(value, expected):
     assert _parse_len(value) == expected
 
 
-class TestReplaceRootSvgAttr:
-    def test_only_touches_root_svg(self):
+class TestSyncRootSvgDim:
+    def test_adds_delta_to_existing_numeric_attr(self):
         # The root <svg width=…> must change; the nested <rect width=…> must not.
         src = '<svg width="800" height="600"><rect width="800" height="600"/></svg>'
-        out, ok = _replace_root_svg_attr(src, "width", 20)
-        assert ok is True
+        out, mode = _sync_root_svg_dim(src, "width", 20, fallback_value=None)
+        assert mode == "add"
         assert '<svg width="820"' in out
         assert '<rect width="800"' in out  # nested rect untouched
 
-    def test_returns_false_when_attr_missing(self):
-        # Root svg has no width attr — leave it alone rather than inventing one.
+    def test_injects_attr_when_missing(self):
+        # Root svg has no width — inject it from the new viewBox dim so the
+        # canvas grows with the viewBox instead of squashing the diagram.
         src = '<svg viewBox="0 0 800 600"><rect width="800"/></svg>'
-        out, ok = _replace_root_svg_attr(src, "width", 20)
-        assert ok is False
+        out, mode = _sync_root_svg_dim(src, "width", 20, fallback_value=820)
+        assert mode == "inject"
+        assert 'width="820"' in out
+        assert out != src
+
+    def test_skips_when_missing_and_no_fallback(self):
+        # No width attr and we don't know the viewBox dim → leave it alone.
+        src = '<svg viewBox="0 0 800 600"><rect width="800"/></svg>'
+        out, mode = _sync_root_svg_dim(src, "width", 20, fallback_value=None)
+        assert mode == "skip"
         assert out == src
 
-    def test_returns_false_for_non_numeric_attr(self):
+    def test_skips_for_non_numeric_attr(self):
+        # width="100%" can't be incremented — must not be invented over either.
         src = '<svg width="100%" height="600"/>'
-        out, ok = _replace_root_svg_attr(src, "width", 20)
-        assert ok is False
+        out, mode = _sync_root_svg_dim(src, "width", 20, fallback_value=820)
+        assert mode == "skip"
         assert out == src
 
-    def test_returns_false_when_no_svg_tag(self):
-        out, ok = _replace_root_svg_attr("not an svg", "width", 20)
-        assert ok is False
+    def test_skips_when_no_svg_tag(self):
+        out, mode = _sync_root_svg_dim("not an svg", "width", 20, fallback_value=None)
+        assert mode == "skip"
         assert out == "not an svg"
+
+
+class TestExpandViewbox:
+    def test_handles_single_quoted_viewbox(self):
+        # Single-quoted viewBox must be rewritten, not silently skipped.
+        src = "<svg viewBox='0 0 400 200' width='400' height='200'><rect/></svg>"
+        out, msg = _expand_viewbox(src, 50, 0)
+        assert msg is not None
+        assert "viewBox='0 0 450 200'" in out  # quote style preserved, w grown
+        assert "width='450'" in out or 'width="450"' in out
+
+    def test_handles_double_quoted_viewbox(self):
+        src = '<svg viewBox="0 0 400 200" width="400" height="200"><rect/></svg>'
+        out, msg = _expand_viewbox(src, 0, 30)
+        assert msg is not None
+        assert 'viewBox="0 0 400 230"' in out
+        assert 'height="230"' in out
+
+    def test_injects_width_when_root_has_none(self):
+        # Root svg without width/height: canvas must be injected from the new
+        # viewBox so the diagram doesn't silently shrink.
+        src = '<svg viewBox="0 0 400 200"><rect/></svg>'
+        out, msg = _expand_viewbox(src, 60, 0)
+        assert msg is not None
+        assert 'viewBox="0 0 460 200"' in out
+        assert 'width="460"' in out
+        assert "injected" in msg
+
+    def test_returns_none_for_zero_delta(self):
+        src = '<svg viewBox="0 0 400 200"/>'
+        out, msg = _expand_viewbox(src, 0, 0)
+        assert msg is None
+        assert out == src
+
+    def test_skips_malformed_viewbox(self):
+        # Non-4-segment viewBox must be reported as skipped, not crash.
+        src = '<svg viewBox="0 0 400" width="400"/>'
+        out, msg = _expand_viewbox(src, 50, 0)
+        assert msg is not None
+        assert "skipped" in msg
+        assert 'viewBox="0 0 400"' in out  # untouched
+
+    def test_skips_non_numeric_viewbox(self):
+        src = '<svg viewBox="0 0 abc 200" width="400"/>'
+        out, msg = _expand_viewbox(src, 50, 0)
+        assert msg is not None
+        assert "skipped" in msg
 
 
 class TestSafeBackup:
@@ -120,6 +178,46 @@ class TestFixCardUnits:
         assert 'width="180"' in new_content
         # Closing tag is preserved (the regression: this rect was never matched).
         assert "</rect>" in new_content
+
+    def test_fingerprint_matches_exact_attrs_not_substring(self):
+        # A7: x="10" must NOT substring-match x="100" or transform="translate(10,…)".
+        # Here the target is the x="10" rect; a decoy with x="100" must be ignored.
+        attrs = {"x": "10", "y": "10", "width": "150", "height": "40"}
+        content = (
+            "<svg>"
+            '<rect x="100" y="10" width="150" height="40"/>'
+            '<rect x="10" y="10" width="150" height="40"/>'
+            "</svg>"
+        )
+        new_content, msg = _fix_card(content, attrs, 30, 0)
+        assert msg is not None
+        # Only the x="10" rect's width becomes 180; the x="100" decoy stays 150.
+        assert new_content.count('width="180"') == 1
+        assert new_content.count('width="150"') == 1
+
+    def test_not_confused_by_transform_substring(self):
+        # A7: a transform="translate(10,10)" must not make a different rect
+        # look like an x="10" y="10" match.
+        attrs = {"x": "10", "y": "10", "width": "150", "height": "40"}
+        content = (
+            "<svg>"
+            '<rect x="200" y="200" width="150" height="40" transform="translate(10,10)"/>'
+            '<rect x="10" y="10" width="150" height="40"/>'
+            "</svg>"
+        )
+        new_content, msg = _fix_card(content, attrs, 30, 0)
+        assert msg is not None
+        # The transform decoy keeps width="150"; only the real target widens.
+        assert new_content.count('width="180"') == 1
+        assert new_content.count('width="150"') == 1
+
+    def test_returns_none_when_no_rect_matches(self):
+        # A7: attrs pointing to a non-existent rect must return (content, None).
+        attrs = {"x": "999", "y": "999", "width": "150", "height": "40"}
+        content = '<svg><rect x="10" y="10" width="150" height="40"/></svg>'
+        new_content, msg = _fix_card(content, attrs, 30, 0)
+        assert msg is None
+        assert new_content == content
 
 
 # ── Playwright regression tests ────────────────────────────────────────────

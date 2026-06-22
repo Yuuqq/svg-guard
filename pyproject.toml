@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "svg-guard"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Detect and auto-fix text overflow in SVG diagrams"
 readme = "README.md"
 license = "MIT"
@@ -31,6 +31,11 @@ dev = ["pytest>=7", "pytest-playwright>=0.4"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/svg_guard"]
+
+# Single source of truth for the version: keep it in src/svg_guard/__init__.py
+# and let hatchling read it here. Avoids pyproject/__init__ drift on release.
+[tool.hatch.version]
+path = "src/svg_guard/__init__.py"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

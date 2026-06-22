@@ -6,6 +6,7 @@ import re
 import shutil
 from pathlib import Path
 
+from ._io import read_svg, write_text_atomic
 from .checker import Issue
 
 # Matches a numeric length with an optional unit. Bare numbers, px, pt, em and %
@@ -33,7 +34,7 @@ def fix_svg(
     ``.bak.2`` …) is used so the original is never clobbered.
     """
     svg_path = Path(svg_path)
-    content = svg_path.read_text(encoding="utf-8")
+    content = read_svg(svg_path)
     changes: list[str] = []
 
     if backup and not dry_run:
@@ -91,7 +92,7 @@ def fix_svg(
             changes.append(change)
 
     if changes and not dry_run:
-        svg_path.write_text(content, encoding="utf-8")
+        write_text_atomic(svg_path, content)
 
     return changes
 
@@ -136,41 +137,112 @@ def _parse_len(value: str, ref_px: float = _DEFAULT_FONT_PX) -> float | None:
 def _expand_viewbox(
     content: str, delta_w: float, delta_h: float
 ) -> tuple[str, str | None]:
-    """Widen the viewBox and the root <svg> width/height by the given deltas."""
+    """Widen the viewBox and the root <svg> width/height by the given deltas.
+
+    Handles both double- and single-quoted ``viewBox`` attributes. When the
+    root ``<svg>`` has no ``width``/``height`` attribute, a matching pair is
+    synthesised from the new viewBox so the rendered canvas grows with it
+    (otherwise the larger viewBox would just be scaled into the old box and
+    the whole diagram would shrink — a silent visual regression).
+    """
     if delta_w <= 0 and delta_h <= 0:
         return content, None
 
     new_content = content
     skipped: list[str] = []
+    # Parsed new viewBox dims, populated by replace_vb so the width/height
+    # injection below can reuse them without re-parsing.
+    new_vb_w: float | None = None
+    new_vb_h: float | None = None
 
-    def replace_vb(m: re.Match) -> str:
-        parts = m.group(1).split()
+    def replace_vb(quote: str, inner: str) -> str:
+        nonlocal new_vb_w, new_vb_h
+        parts = inner.split()
         if len(parts) != 4:
             skipped.append("viewBox (unrecognized format)")
-            return m.group(0)
+            return f"viewBox={quote}{inner}{quote}"
         try:
             nums = [float(p) for p in parts]
         except ValueError:
-            skipped.append(f'viewBox="{m.group(1)}"')
-            return m.group(0)
+            skipped.append(f"viewBox={quote}{inner}{quote}")
+            return f"viewBox={quote}{inner}{quote}"
         w = nums[2] + delta_w
         h = nums[3] + delta_h
-        return f'viewBox="{nums[0]:.0f} {nums[1]:.0f} {w:.0f} {h:.0f}"'
+        new_vb_w, new_vb_h = w, h
+        return f"viewBox={quote}{nums[0]:.0f} {nums[1]:.0f} {w:.0f} {h:.0f}{quote}"
 
-    new_content = re.sub(r'viewBox="([^"]*)"', replace_vb, new_content, count=1)
+    def vb_callback(m: "re.Match[str]") -> str:
+        if m.group(1) is not None:
+            return replace_vb('"', m.group(1))
+        return replace_vb("'", m.group(2))
 
-    parts_msg = []
+    # Match viewBox with either double- or single-quoted value (XML allows
+    # both) and preserve the original quote style on rewrite.
+    new_content = re.sub(
+        r'viewBox\s*=\s*"([^"]*)"|viewBox\s*=\s*\'([^\']*)\'',
+        vb_callback,
+        new_content,
+        count=1,
+    )
+
+    # Sync the root <svg> width/height to the new viewBox:
+    #  - if the attr exists, add the same delta (canvas grows with viewBox);
+    #  - if it is missing, inject it set to the new viewBox dim (otherwise the
+    #    bigger viewBox would be squashed into the default 300x150 box).
+    parts_msg: list[str] = []
     if delta_w > 0:
-        new_content, ok = _replace_root_svg_attr(new_content, "width", delta_w)
-        parts_msg.append(f"+{delta_w:.0f}w" if ok else "width (skipped)")
+        new_content, mode = _sync_root_svg_dim(new_content, "width", delta_w, new_vb_w)
+        parts_msg.append(_dim_msg("w", delta_w, mode))
     if delta_h > 0:
-        new_content, ok = _replace_root_svg_attr(new_content, "height", delta_h)
-        parts_msg.append(f"+{delta_h:.0f}h" if ok else "height (skipped)")
+        new_content, mode = _sync_root_svg_dim(new_content, "height", delta_h, new_vb_h)
+        parts_msg.append(_dim_msg("h", delta_h, mode))
 
     msg = f"viewBox expanded ({', '.join(parts_msg)})"
     if skipped:
         msg += f"; skipped {', '.join(skipped)}"
     return new_content, msg
+
+
+def _sync_root_svg_dim(
+    content: str, attr: str, delta: float, fallback_value: float | None
+) -> tuple[str, str]:
+    """Grow or inject ``attr`` on the root <svg> to match the viewBox growth.
+
+    Returns (new_content, mode) where mode is one of:
+      ``"add"``     — existing numeric attr incremented by delta
+      ``"inject"``  — attr was missing, set to fallback_value (the new viewBox dim)
+      ``"skip"``    — attr present but non-numeric (e.g. "100%"), left untouched
+    """
+    svg_match = re.search(r"<svg\b[^>]*>", content)
+    if not svg_match:
+        return content, "skip"
+    svg_tag = svg_match.group(0)
+
+    m = re.search(rf'\b{attr}\s*=\s*"([^"]*)"', svg_tag)
+    if not m:
+        # Missing — inject from the new viewBox dim if we know it.
+        if fallback_value is None:
+            return content, "skip"
+        insert_at = svg_match.end()
+        injected = f' {attr}="{fallback_value:.0f}"'
+        new_content = content[:insert_at] + injected + content[insert_at:]
+        return new_content, "inject"
+
+    old = _parse_len(m.group(1))
+    if old is None:
+        return content, "skip"  # e.g. width="100%": leave alone, don't invent
+    new_val = old + delta
+    new_tag = svg_tag[: m.start()] + f'{attr}="{new_val:.0f}"' + svg_tag[m.end() :]
+    new_content = content[: svg_match.start()] + new_tag + content[svg_match.end() :]
+    return new_content, "add"
+
+
+def _dim_msg(axis: str, delta: float, mode: str) -> str:
+    if mode == "add":
+        return f"+{delta:.0f}{axis}"
+    if mode == "inject":
+        return f"{axis} (injected)"
+    return f"{axis} (skipped)"
 
 
 def _fix_card(
@@ -179,7 +251,18 @@ def _fix_card(
     expand_w: float,
     expand_h: float,
 ) -> tuple[str, str | None]:
-    """Expand the rect identified by ``attrs`` (x/y/width/height)."""
+    """Expand the rect identified by ``attrs`` (x/y/width/height).
+
+    Identifies the target rect by matching a *fingerprint* of several
+    attributes (x, y, width, height, fill) parsed as proper ``key="value"``
+    tokens, not as substrings. This avoids two known mis-fixes:
+
+      * two rects sharing the same x/y (e.g. background + card layer) used to
+        collapse onto one slot and only the first was ever widened;
+      * ``x="10"`` substring-matched inside ``transform="translate(10,…)"``.
+
+    Supports both double- and single-quoted attribute values.
+    """
     if expand_w <= 0 and expand_h <= 0:
         return content, None
 
@@ -187,19 +270,53 @@ def _fix_card(
     target_y = attrs.get("y", "")
     target_w = attrs.get("width", "")
     target_h = attrs.get("height", "")
+    target_fill = attrs.get("fill", "")
 
     # Sanity: we can only rewrite widths we understand.
     cur_w = _parse_len(target_w) if target_w else None
     cur_h = _parse_len(target_h) if target_h else None
 
-    # Build the attribute fingerprints we must match to identify the rect.
-    fingerprints = [(k, v) for k, v in (("x", target_x), ("y", target_y)) if v]
+    # Fingerprint: every (attr, value) pair here must be present on the rect
+    # tag, matched as a real attribute token (so x="10" won't match x="100").
+    fingerprint = [
+        (k, v)
+        for k, v in (
+            ("x", target_x),
+            ("y", target_y),
+            ("width", target_w),
+            ("height", target_h),
+            ("fill", target_fill),
+        )
+        if v and v != "0"  # x/y default to "0" when absent; not discriminative
+    ]
+
+    def attr_value(tag: str, attr: str) -> str | None:
+        """Return the value of ``attr`` in ``tag``, or None if absent.
+
+        Tolerates either quote style and optional whitespace around ``=``.
+        """
+        m = re.search(rf'\b{attr}\s*=\s*"([^"]*)"', tag)
+        if m:
+            return m.group(1)
+        m = re.search(rf"\b{attr}\s*=\s*'([^']*)'", tag)
+        if m:
+            return m.group(1)
+        return None
+
+    def set_attr(tag: str, attr: str, old_val: str, new_val: str) -> str:
+        """Rewrite ``attr``'s value, preserving its quote style."""
+        for quote in ('"', "'"):
+            pat = f"{attr}={quote}{old_val}{quote}"
+            if pat in tag:
+                return tag.replace(pat, f"{attr}={quote}{new_val}{quote}", 1)
+        return tag  # shouldn't happen — caller verified the value
 
     # Match a <rect …> open tag (covers both self-closing and open-close forms,
     # since width/height always live on the open tag).
     for m in re.finditer(r"<rect\b[^>]*>", content):
         tag = m.group()
-        if not all(f'{k}="{v}"' in tag for k, v in fingerprints):
+
+        if not all(attr_value(tag, k) == v for k, v in fingerprint):
             continue
 
         new_tag = tag
@@ -213,7 +330,7 @@ def _fix_card(
                     f'width="{target_w}"',
                 )
             new_w = cur_w + expand_w
-            new_tag = new_tag.replace(f'width="{target_w}"', f'width="{new_w:.0f}"')
+            new_tag = set_attr(new_tag, "width", target_w, f"{new_w:.0f}")
             parts.append(f"width {target_w}->{new_w:.0f}")
 
         if expand_h > 0:
@@ -224,7 +341,7 @@ def _fix_card(
                     f'height="{target_h}"',
                 )
             new_h = cur_h + expand_h
-            new_tag = new_tag.replace(f'height="{target_h}"', f'height="{new_h:.0f}"')
+            new_tag = set_attr(new_tag, "height", target_h, f"{new_h:.0f}")
             parts.append(f"height {target_h}->{new_h:.0f}")
 
         if new_tag == tag:
@@ -234,27 +351,3 @@ def _fix_card(
         return new_content, f"rect({target_x},{target_y}) {' '.join(parts)}"
 
     return content, None
-
-
-def _replace_root_svg_attr(content: str, attr: str, delta: float) -> tuple[str, bool]:
-    """Add ``delta`` to ``attr`` on the root <svg> tag only.
-
-    Returns the new content and a flag indicating whether the attribute was
-    actually rewritten (False when it was missing or non-numeric).
-    """
-    svg_match = re.search(r"<svg\b[^>]*>", content)
-    if not svg_match:
-        return content, False
-    svg_tag = svg_match.group(0)
-
-    attr_re = re.compile(rf'\b{attr}="([^"]*)"')
-    m = attr_re.search(svg_tag)
-    if not m:
-        return content, False  # leave it alone rather than inventing a value
-
-    old = _parse_len(m.group(1))
-    if old is None:
-        return content, False
-
-    new_tag = svg_tag[: m.start()] + f'{attr}="{old + delta:.0f}"' + svg_tag[m.end() :]
-    return content[: svg_match.start()] + new_tag + content[svg_match.end() :], True

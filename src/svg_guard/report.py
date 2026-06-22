@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .checker import CheckResult
+from ._io import write_text_atomic
 
 _CSS = """
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -50,7 +51,11 @@ def generate_report(
     """Generate a self-contained HTML report."""
     output_path = Path(output_path)
     total_files = len(results)
-    files_with_issues = sum(1 for r in results.values() if not r.ok)
+    # Distinguish genuine overflow issues from render errors — a file that
+    # failed to render is "not ok" but has zero issues, and should be reported
+    # as an error rather than lumped into the issues count.
+    files_with_issues = sum(1 for r in results.values() if not r.ok and r.error is None)
+    files_with_errors = sum(1 for r in results.values() if r.error is not None)
     total_issues = sum(len(r.issues) for r in results.values())
 
     parts = [
@@ -68,13 +73,15 @@ def generate_report(
         f'<div class="stat-label">Files</div></div>',
         f'<div class="stat"><div class="stat-val {"ok" if files_with_issues == 0 else "bad"}">'
         f'{files_with_issues}</div><div class="stat-label">With Issues</div></div>',
+        f'<div class="stat"><div class="stat-val {"ok" if files_with_errors == 0 else "bad"}">'
+        f'{files_with_errors}</div><div class="stat-label">Errors</div></div>',
         f'<div class="stat"><div class="stat-val {"ok" if total_issues == 0 else "bad"}">'
         f'{total_issues}</div><div class="stat-label">Issues</div></div>',
         "</div></header>",
         "<main>",
     ]
 
-    if total_issues == 0:
+    if total_issues == 0 and files_with_errors == 0:
         parts.append(
             '<p class="empty">All SVG files passed — no overflow issues found.</p>'
         )
@@ -84,26 +91,40 @@ def generate_report(
                 continue
             parts.append('<div class="file-card">')
             parts.append(f'<div class="file-name">{html.escape(name)}</div>')
-            parts.append(
-                f'<div class="file-issues">'
-                f'<span class="badge">{len(result.issues)} issues</span></div>'
-            )
-            for issue in result.issues:
-                dir_class = (
-                    "text-overflow"
-                    if "viewbox" not in issue.direction
-                    else "viewbox-overflow"
+            if result.error is not None:
+                # Render error: show what went wrong instead of fake "0 issues".
+                parts.append(
+                    '<div class="file-issues">'
+                    '<span class="badge">render error</span></div>'
                 )
                 parts.append(
                     f'<div class="issue-row">'
-                    f'<span class="issue-type">{html.escape(issue.type)}</span>'
-                    f'<span class="issue-dir {dir_class}">{html.escape(issue.direction)}</span>'
-                    f'<span class="issue-text">{html.escape(issue.text)}</span>'
+                    f'<span class="issue-type">error</span>'
+                    f'<span class="issue-dir viewbox-overflow">render failed</span>'
+                    f'<span class="issue-text">{html.escape(result.error)}</span>'
                     f"</div>"
                 )
+            else:
+                parts.append(
+                    f'<div class="file-issues">'
+                    f'<span class="badge">{len(result.issues)} issues</span></div>'
+                )
+                for issue in result.issues:
+                    dir_class = (
+                        "text-overflow"
+                        if "viewbox" not in issue.direction
+                        else "viewbox-overflow"
+                    )
+                    parts.append(
+                        f'<div class="issue-row">'
+                        f'<span class="issue-type">{html.escape(issue.type)}</span>'
+                        f'<span class="issue-dir {dir_class}">{html.escape(issue.direction)}</span>'
+                        f'<span class="issue-text">{html.escape(issue.text)}</span>'
+                        f"</div>"
+                    )
             parts.append("</div>")
 
     parts.append("</main></body></html>")
 
-    output_path.write_text("\n".join(parts), encoding="utf-8")
+    write_text_atomic(output_path, "\n".join(parts))
     return output_path

@@ -197,10 +197,16 @@ class CheckResult:
     path: Path
     issues: list[Issue]
     viewBox: dict | None
+    # When rendering this file failed, ``error`` holds the message and
+    # ``issues`` is empty. ``ok`` is False in that case so a broken file is
+    # never mistaken for a clean one. (Previously a render failure was stored
+    # as an empty-issues CheckResult with ok=True, making CI silently green on
+    # corrupt SVGs — see audit finding A2.)
+    error: str | None = None
 
     @property
     def ok(self) -> bool:
-        return len(self.issues) == 0
+        return self.error is None and len(self.issues) == 0
 
 
 def check_svg(page, svg_path: Path) -> CheckResult:
@@ -236,6 +242,7 @@ def check_directory(
 
     results: dict[str, CheckResult] = {}
     total_issues = 0
+    total_errors = 0
 
     with sync_playwright() as p:
         browser = p.chromium.launch()
@@ -245,10 +252,13 @@ def check_directory(
             try:
                 result = check_svg(page, svg_path)
             except Exception as e:
+                # Record the failure ON the result so callers (CLI, JSON report)
+                # can tell a broken file from a clean one. ok becomes False.
                 print(f"  [ERR] {svg_path.name}: {e}")
                 results[svg_path.name] = CheckResult(
-                    path=svg_path, issues=[], viewBox=None
+                    path=svg_path, issues=[], viewBox=None, error=str(e)
                 )
+                total_errors += 1
                 continue
 
             results[svg_path.name] = result
@@ -275,17 +285,23 @@ def check_directory(
 
         browser.close()
 
+    files_with_problems = sum(1 for r in results.values() if not r.ok)
     print(f"\n{'=' * 60}")
     print(
         f"Checked {len(svg_files)} files, found {total_issues} issues "
-        f"in {sum(1 for r in results.values() if not r.ok)} files."
+        f"in {files_with_problems} files"
+        + (f" ({total_errors} failed to render)" if total_errors else "")
+        + "."
     )
 
     if json_out:
         out_path = Path(json_out)
         report = {}
         for name, result in results.items():
-            if not result.ok:
+            if result.error is not None:
+                # Surface errored files explicitly so CI tooling can see them.
+                report[name] = {"error": result.error}
+            elif not result.ok:
                 report[name] = [
                     {
                         "type": i.type,

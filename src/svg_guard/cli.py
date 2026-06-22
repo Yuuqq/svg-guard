@@ -1,9 +1,22 @@
-"""CLI entry point for svg-guard."""
+"""CLI entry point for svg-guard.
+
+Exit code contract (shared by all subcommands):
+
+  * ``0`` — success, no overflow issues (and no render errors)
+  * ``1`` — overflow issues found (check), or fixes still needed (fix)
+  * ``2`` — tool-level error: missing directory, Playwright not installed,
+            or one or more SVGs failed to render and could not be checked
+"""
 
 from __future__ import annotations
 
 import argparse
 import sys
+
+
+def _has_render_errors(results: dict) -> bool:
+    """True if any CheckResult carries a render error."""
+    return any(getattr(r, "error", None) is not None for r in results.values())
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -55,6 +68,14 @@ def main(argv: list[str] | None = None) -> None:
         # Library callers still get the exception; CLI users get a clean message.
         print(f"error: {e}", file=sys.stderr)
         sys.exit(2)
+    except KeyboardInterrupt:
+        print("\ninterrupted", file=sys.stderr)
+        sys.exit(130)
+    except Exception as e:
+        # Catch-all: never leak a raw traceback to the CLI user. Covers
+        # "Playwright not installed", browser launch failure, etc.
+        print(f"error: {type(e).__name__}: {e}", file=sys.stderr)
+        sys.exit(2)
 
 
 def _cmd_check(args: argparse.Namespace) -> None:
@@ -69,6 +90,10 @@ def _cmd_check(args: argparse.Namespace) -> None:
         generate_report(results, args.html_out)
         print(f"HTML report saved to {args.html_out}")
 
+    # Render errors take precedence: a file we couldn't check must not be
+    # reported as a clean pass, even if no other issues were found.
+    if _has_render_errors(results):
+        sys.exit(2)
     sys.exit(1 if total_issues > 0 else 0)
 
 
@@ -76,11 +101,16 @@ def _cmd_fix(args: argparse.Namespace) -> None:
     from .checker import check_directory
     from .fixer import fix_svg
 
-    results, _ = check_directory(args.dir)
+    results, total_issues = check_directory(args.dir)
+    had_render_errors = _has_render_errors(results)
 
     total_fixes = 0
     for name, result in results.items():
         if result.ok:
+            continue
+        if result.error is not None:
+            # Can't fix a file we failed to measure; surface it but skip writing.
+            print(f"  [skip] {name}: render error, not fixable ({result.error})")
             continue
         changes = fix_svg(
             result.path,
@@ -103,6 +133,12 @@ def _cmd_fix(args: argparse.Namespace) -> None:
     if args.dry_run and total_fixes > 0:
         print("Run without --dry-run to apply changes.")
 
+    # Exit 2 if any file failed to render (couldn't be processed at all);
+    # otherwise 1 if there were issues to fix, else 0.
+    if had_render_errors:
+        sys.exit(2)
+    sys.exit(1 if total_issues > 0 else 0)
+
 
 def _cmd_report(args: argparse.Namespace) -> None:
     from .checker import check_directory
@@ -111,6 +147,8 @@ def _cmd_report(args: argparse.Namespace) -> None:
     results, _ = check_directory(args.dir)
     path = generate_report(results, args.output)
     print(f"Report saved to {path}")
+    if _has_render_errors(results):
+        sys.exit(2)
 
 
 if __name__ == "__main__":

@@ -14,3 +14,5 @@ venv/
 .mypy_cache/
 .pytest_cache/
 .ruff_cache/
+# Windows reserved device name; created accidentally by e.g. `> nul` redirects.
+nul
