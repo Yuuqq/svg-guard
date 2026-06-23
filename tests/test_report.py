@@ -188,3 +188,111 @@ class TestWriteJsonReport:
         assert "中文标签溢出" in raw  # not \u-escaped
         report = json.loads(raw)
         assert report["a.svg"][0]["text"] == "中文标签溢出"
+
+
+class TestVisualPreview:
+    """The HTML report's per-file visual preview: inlined SVG + red-box overlay.
+
+    These need a real file on disk (the preview reads it to inline), so they
+    write a tiny SVG into tmp_path. No browser involved.
+    """
+
+    _SVG = (
+        '<svg viewBox="0 0 400 200" width="400" height="200" '
+        'xmlns="http://www.w3.org/2000/svg">'
+        '<rect x="50" y="50" width="200" height="80" fill="#eee"/>'
+        '<text x="60" y="90">hi</text>'
+        "</svg>"
+    )
+
+    def _result(self, path: Path) -> CheckResult:
+        issue = Issue(
+            type="text_rect",
+            text="hi",
+            direction="right",
+            svg={"x": 60, "y": 75, "w": 220, "h": 30},  # overflows the 200-wide rect
+            parent={"svg": {"x": 50, "y": 50, "w": 200, "h": 80}},
+            fix={"expand_w": 30, "expand_h": 0, "fixable": True},
+        )
+        return CheckResult(
+            path=path,
+            issues=[issue],
+            viewBox={"w": 400, "h": 200},
+        )
+
+    def test_preview_contains_inlined_svg_image(self, tmp_path: Path):
+        svg = tmp_path / "a.svg"
+        svg.write_text(self._SVG, encoding="utf-8")
+        out = tmp_path / "report.html"
+        generate_report({"a.svg": self._result(svg)}, out)
+        body = out.read_text(encoding="utf-8")
+        # The source is inlined as a base64 data URI image.
+        assert 'src="data:image/svg+xml;base64,' in body
+
+    def test_preview_draws_red_box_for_each_issue(self, tmp_path: Path):
+        svg = tmp_path / "a.svg"
+        svg.write_text(self._SVG, encoding="utf-8")
+        out = tmp_path / "report.html"
+        generate_report({"a.svg": self._result(svg)}, out)
+        body = out.read_text(encoding="utf-8")
+        # An overlay SVG exists with the file's viewBox.
+        assert 'class="overlay"' in body
+        assert 'viewBox="0 0 400 200"' in body
+        # A red box with data-idx=1 for the first issue, at its measured coords.
+        assert 'class="box" data-idx="1"' in body
+        assert 'x="60"' in body and 'width="220"' in body
+        # The parent rect is drawn dashed.
+        assert 'class="parent"' in body
+
+    def test_issue_rows_carry_index_linking_to_overlay(self, tmp_path: Path):
+        svg = tmp_path / "a.svg"
+        svg.write_text(self._SVG, encoding="utf-8")
+        out = tmp_path / "report.html"
+        generate_report({"a.svg": self._result(svg)}, out)
+        body = out.read_text(encoding="utf-8")
+        # Row and box share data-idx="1" so the hover-link script can pair them.
+        assert 'class="issue-row" data-idx="1"' in body
+        assert 'data-idx="1"' in body  # box
+        # The linking script is present.
+        assert "<script>" in body
+
+    def test_no_preview_when_viewbox_missing(self, tmp_path: Path):
+        # If neither the measured viewBox nor the source has one, there is no
+        # coordinate system to align an overlay to — skip the preview entirely
+        # and just render the issue list.
+        svg = tmp_path / "a.svg"
+        svg.write_text("<svg/>", encoding="utf-8")  # no viewBox
+        result = CheckResult(
+            path=svg,
+            issues=[
+                Issue(
+                    type="text_rect",
+                    text="x",
+                    direction="right",
+                    svg={"x": 1, "y": 2, "w": 3, "h": 4},
+                    parent={},
+                    fix={},
+                )
+            ],
+            viewBox=None,
+        )
+        out = tmp_path / "report.html"
+        generate_report({"a.svg": result}, out)
+        body = out.read_text(encoding="utf-8")
+        assert '<div class="preview">' not in body  # no preview block rendered
+        # Issue list still rendered.
+        assert "text_rect" in body
+
+    def test_large_svg_falls_back_to_schematic(self, tmp_path: Path):
+        # A source bigger than the inline cap is NOT inlined as an image, but
+        # the coordinate overlay is still drawn from the measured data.
+        svg = tmp_path / "big.svg"
+        # Pad the SVG well past _MAX_PREVIEW_BYTES with a huge comment.
+        pad = "<!-- " + ("x" * 210_000) + " -->"
+        svg.write_text(self._SVG.replace("</svg>", pad + "</svg>"), encoding="utf-8")
+        out = tmp_path / "report.html"
+        generate_report({"big.svg": self._result(svg)}, out)
+        body = out.read_text(encoding="utf-8")
+        assert "data:image/svg+xml;base64" not in body  # not inlined
+        assert "schematic only" in body  # fallback note shown
+        assert 'class="box" data-idx="1"' in body  # overlay still drawn

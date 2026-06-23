@@ -9,7 +9,7 @@ When SVG diagrams use hardcoded absolute coordinates — common in technical doc
 - **Accurate detection** — uses Chromium via Playwright for real rendering measurements, not heuristic estimates
 - **Two-phase check** — catches both text→rect overflow *and* rect→viewBox overflow
 - **Auto-fix** — widens cards and expands viewBox to resolve overflow automatically
-- **HTML report** — generates a self-contained visual report of all issues
+- **HTML report** — generates a self-contained visual report: each problem file shows its **rendered SVG with red-box overlays** marking every overflow region (plus the parent rect), cross-highlighted with the issue list on hover
 - **CI-friendly** — exits with code 1 on issues; supports JSON and HTML output
 - **Backup-safe** — creates `.bak` files before any fix
 

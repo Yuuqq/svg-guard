@@ -2,13 +2,27 @@
 
 from __future__ import annotations
 
+import base64
 import html
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 
-from .checker import CheckResult
-from ._io import write_text_atomic
+from .checker import CheckResult, Issue
+from ._io import read_svg, write_text_atomic
+
+# Cap on how many bytes of source SVG we inline into the report as a preview
+# image. Huge SVGs would bloat the HTML and slow browsers; above this we fall
+# back to a coordinate-only schematic.
+_MAX_PREVIEW_BYTES = 200_000
+
+# viewBox="min-x min-y width height" — used to align the overlay to the SVG's
+# own coordinate system when the source can't be inlined.
+_VIEWBOX_RE = re.compile(
+    r"""viewBox\s*=\s*["']\s*([+-]?\d*\.?\d+)\s+([+-]?\d*\.?\d+)\s+([+-]?\d*\.?\d+)\s+([+-]?\d*\.?\d+)\s*["']""",
+    re.IGNORECASE,
+)
 
 _CSS = """
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -30,9 +44,11 @@ main { max-width: 900px; margin: 0 auto; }
 .file-name { font-size: 18px; font-weight: 700; margin-bottom: 4px;
              font-family: "SF Mono", "Cascadia Code", monospace; }
 .file-issues { color: #dc2626; font-size: 14px; margin-bottom: 16px; }
-.issue-row { display: grid; grid-template-columns: 80px 100px 1fr;
+.issue-row { display: grid; grid-template-columns: 28px 80px 100px 1fr;
              gap: 12px; padding: 10px 0; border-top: 1px solid #f1f5f9;
-             font-size: 14px; align-items: baseline; }
+             font-size: 14px; align-items: baseline; cursor: default; }
+.issue-row.highlighted { background: #fef2f2; }
+.issue-idx { font-weight: 700; color: #dc2626; text-align: center; }
 .issue-type { font-weight: 700; color: #6366f1; }
 .issue-dir { font-weight: 600; }
 .issue-dir.text-overflow { color: #dc2626; }
@@ -42,7 +58,174 @@ main { max-width: 900px; margin: 0 auto; }
          border-radius: 6px; padding: 2px 8px; font-size: 13px; font-weight: 700; }
 .empty { text-align: center; color: #16a34a; font-size: 18px;
          font-weight: 700; padding: 48px 0; }
+
+/* Visual preview: original SVG image with a red-box overlay. */
+.preview { position: relative; margin-bottom: 16px; border: 1px solid #e2e8f0;
+           border-radius: 8px; overflow: hidden; background:
+           repeating-conic-gradient(#f1f5f9 0% 25%, #fff 0% 50%) 50% / 20px 20px; }
+.preview svg.preview-img { display: block; width: 100%; height: auto; }
+.preview .overlay { position: absolute; inset: 0; width: 100%; height: 100%;
+                    pointer-events: none; }
+.overlay rect.box { fill: rgba(220, 38, 38, 0.12); stroke: #dc2626;
+                    stroke-width: 2; vector-effect: non-scaling-stroke; }
+.overlay rect.box.active { fill: rgba(220, 38, 38, 0.28); }
+.overlay rect.parent { fill: rgba(99, 102, 241, 0.06); stroke: #6366f1;
+                        stroke-width: 1.5; stroke-dasharray: 4 3;
+                        vector-effect: non-scaling-stroke; }
+.overlay .num { fill: #fff; stroke: #dc2626; stroke-width: 2;
+                paint-order: stroke; font: bold 11px sans-serif; }
+.preview-note { font-size: 12px; color: #94a3b8; margin-top: 6px; }
+.preview .legend { display: inline-flex; gap: 12px; font-size: 11px;
+                   color: #64748b; padding: 6px 10px; }
+.legend .sw { display: inline-block; width: 10px; height: 10px;
+              vertical-align: middle; margin-right: 4px; border-radius: 2px; }
+.legend .sw.over { background: rgba(220,38,38,0.4); border: 1px solid #dc2626; }
+.legend .sw.par { background: rgba(99,102,241,0.15); border: 1px dashed #6366f1; }
 """
+
+# Small script that links an issue row to its overlay box: hovering either
+# end highlights the other. Kept tiny and dependency-free.
+_JS = """
+<script>
+(function () {
+  document.querySelectorAll('.issue-row[data-idx]').forEach(function (row) {
+    var idx = row.getAttribute('data-idx');
+    var box = document.querySelector('.overlay rect.box[data-idx="' + idx + '"]');
+    if (!box) return;
+    function on() { row.classList.add('highlighted'); box.classList.add('active'); }
+    function off() { row.classList.remove('highlighted'); box.classList.remove('active'); }
+    row.addEventListener('mouseenter', on);
+    row.addEventListener('mouseleave', off);
+  });
+})();
+</script>
+"""
+
+
+def _viewbox_dims(result: CheckResult) -> tuple[float, float] | None:
+    """Best-effort (w, h) of the SVG's viewBox for overlay alignment.
+
+    Prefers the measured viewBox the checker stored on the result; falls
+    back to parsing the source file's viewBox attribute.
+    """
+    vb = result.viewBox
+    if isinstance(vb, dict) and vb.get("w") and vb.get("h"):
+        return float(vb["w"]), float(vb["h"])
+    try:
+        src = read_svg(result.path)
+    except OSError:
+        return None
+    m = _VIEWBOX_RE.search(src)
+    if m:
+        return float(m.group(3)), float(m.group(4))
+    return None
+
+
+def _issue_box(issue: Issue) -> tuple[float, float, float, float] | None:
+    """The (x, y, w, h) the overlay should outline for an issue."""
+    svg = issue.svg or {}
+    try:
+        return float(svg["x"]), float(svg["y"]), float(svg["w"]), float(svg["h"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _parent_box(issue: Issue) -> tuple[float, float, float, float] | None:
+    """The parent rect's (x, y, w, h), when present (text_rect issues)."""
+    parent = issue.parent or {}
+    svg = parent.get("svg") if isinstance(parent, dict) else None
+    if not isinstance(svg, dict):
+        return None
+    try:
+        return float(svg["x"]), float(svg["y"]), float(svg["w"]), float(svg["h"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _render_preview(result: CheckResult) -> str:
+    """Build the preview HTML for one file: original SVG + red-box overlay.
+
+    Returns '' when no preview can be produced (no viewBox, or all issues
+    lack coordinates) — the caller just renders the issue list instead.
+    """
+    vb = _viewbox_dims(result)
+    if vb is None:
+        return ""
+    vbw, vbh = vb
+
+    # Try to inline the real SVG as an <img> (data URI) so the preview shows
+    # the actual rendering. Skip if the file is missing or too large.
+    img_tag = ""
+    try:
+        src = read_svg(result.path)
+    except OSError:
+        src = ""
+    if src and len(src.encode("utf-8")) <= _MAX_PREVIEW_BYTES:
+        b64 = base64.b64encode(src.encode("utf-8")).decode("ascii")
+        img_tag = (
+            f'<img class="preview-img" alt="{html.escape(result.path.name)}" '
+            f'src="data:image/svg+xml;base64,{b64}">'
+        )
+
+    # Build the overlay: one red box per issue with a coordinate, plus a
+    # dashed parent-rect box for text_rect issues. viewBox matches the SVG so
+    # coordinates line up 1:1. vector-effect keeps strokes crisp at any scale.
+    overlay_shapes: list[str] = []
+    legend = ""
+    has_parent = False
+    for idx, issue in enumerate(result.issues, start=1):
+        box = _issue_box(issue)
+        if box is None:
+            continue
+        x, y, w, h = box
+        # Number label sits at the box's top-left corner.
+        overlay_shapes.append(
+            f'<rect class="box" data-idx="{idx}" '
+            f'x="{x:.0f}" y="{y:.0f}" width="{w:.0f}" height="{h:.0f}">'
+            f"<title>#{idx} {html.escape(issue.type)} {html.escape(issue.direction)}</title></rect>"
+        )
+        overlay_shapes.append(
+            f'<text class="num" x="{x + 4:.0f}" y="{y + 12:.0f}">{idx}</text>'
+        )
+        pbox = _parent_box(issue)
+        if pbox:
+            has_parent = True
+            px, py, pw, ph = pbox
+            overlay_shapes.append(
+                f'<rect class="parent" x="{px:.0f}" y="{py:.0f}" '
+                f'width="{pw:.0f}" height="{ph:.0f}">'
+                f"<title>parent rect #{idx}</title></rect>"
+            )
+
+    if not overlay_shapes:
+        return ""  # nothing drawable
+
+    if has_parent:
+        legend = (
+            '<div class="legend">'
+            '<span><i class="sw over"></i>overflow</span>'
+            '<span><i class="sw par"></i>parent rect</span>'
+            "</div>"
+        )
+
+    overlay = (
+        f'<svg class="overlay" viewBox="0 0 {vbw:.0f} {vbh:.0f}" '
+        f'preserveAspectRatio="xMidYMid meet" '
+        f'xmlns="http://www.w3.org/2000/svg">' + "".join(overlay_shapes) + "</svg>"
+    )
+
+    note = (
+        ""
+        if img_tag
+        else (
+            '<div class="preview-note">schematic only '
+            "(source too large to inline; coordinates from measurement)</div>"
+        )
+    )
+
+    return (
+        '<div class="preview">' + legend + (img_tag or "") + overlay + "</div>" + note
+    )
 
 
 def generate_report(
@@ -64,7 +247,9 @@ def generate_report(
         "<html lang='en'><head><meta charset='UTF-8'>",
         "<meta name='viewport' content='width=device-width, initial-scale=1.0'>",
         f"<title>SVG Guard Report — {total_files} files</title>",
-        f"<style>{_CSS}</style></head><body>",
+        f"<style>{_CSS}</style>",
+        _JS,
+        "</head><body>",
         "<header>",
         "<h1>SVG Guard Report</h1>",
         f'<p class="meta">{datetime.now().strftime("%Y-%m-%d %H:%M")} — '
@@ -100,6 +285,7 @@ def generate_report(
                 )
                 parts.append(
                     f'<div class="issue-row">'
+                    f'<span class="issue-idx"></span>'
                     f'<span class="issue-type">error</span>'
                     f'<span class="issue-dir viewbox-overflow">render failed</span>'
                     f'<span class="issue-text">{html.escape(result.error)}</span>'
@@ -110,14 +296,17 @@ def generate_report(
                     f'<div class="file-issues">'
                     f'<span class="badge">{len(result.issues)} issues</span></div>'
                 )
-                for issue in result.issues:
+                # Visual preview (original SVG + red-box overlay), if drawable.
+                parts.append(_render_preview(result))
+                for idx, issue in enumerate(result.issues, start=1):
                     dir_class = (
                         "text-overflow"
                         if "viewbox" not in issue.direction
                         else "viewbox-overflow"
                     )
                     parts.append(
-                        f'<div class="issue-row">'
+                        f'<div class="issue-row" data-idx="{idx}">'
+                        f'<span class="issue-idx">{idx}</span>'
                         f'<span class="issue-type">{html.escape(issue.type)}</span>'
                         f'<span class="issue-dir {dir_class}">{html.escape(issue.direction)}</span>'
                         f'<span class="issue-text">{html.escape(issue.text)}</span>'
