@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -79,3 +80,68 @@ class TestModuleEntryPoint:
         )
         assert out.returncode == 0
         assert __version__ in out.stdout
+
+
+class TestExitCodeContract:
+    """End-to-end exit codes via ``python -m svg_guard`` in a subprocess.
+
+    We deliberately run the CLI in a SUBPROCESS rather than calling main()
+    in-process: svg-guard uses sync_playwright, and pytest-playwright (loaded
+    by the browser-driven tests in this suite) keeps an asyncio loop alive
+    that conflicts with a second sync_playwright instance in the same
+    process. A subprocess gives a clean Playwright environment and also tests
+    the real entry point users hit.
+    """
+
+    def _run_cli(
+        self, *args: str, cwd: Path | None = None
+    ) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, "-m", "svg_guard", *args],
+            capture_output=True,
+            text=True,
+            cwd=cwd,
+        )
+
+    def _copy_fixture_into(self, name: str, tmp_path: Path) -> Path:
+        fixtures = Path(__file__).parent / "fixtures"
+        dst = tmp_path / name
+        dst.write_text(
+            fixtures.joinpath(name).read_text(encoding="utf-8"), encoding="utf-8"
+        )
+        return dst
+
+    def test_clean_directory_exits_0(self, tmp_path):
+        self._copy_fixture_into("good.svg", tmp_path)
+        r = self._run_cli("check", "--dir", str(tmp_path))
+        assert r.returncode == 0, r.stderr
+
+    def test_overflow_directory_exits_1(self, tmp_path):
+        self._copy_fixture_into("text_overflow.svg", tmp_path)
+        r = self._run_cli("check", "--dir", str(tmp_path))
+        assert r.returncode == 1, r.stderr
+
+    def test_directory_with_render_error_exits_2(self, tmp_path):
+        self._copy_fixture_into("good.svg", tmp_path)
+        # A truncated/unparseable SVG must trigger a render error → exit 2,
+        # NOT a silent "clean" pass.
+        (tmp_path / "broken.svg").write_text("<svg><rect", encoding="utf-8")
+        r = self._run_cli("check", "--dir", str(tmp_path))
+        assert r.returncode == 2, r.stderr
+
+    def test_fix_dry_run_does_not_modify_file(self, tmp_path):
+        bad = self._copy_fixture_into("text_overflow.svg", tmp_path)
+        before = bad.read_text(encoding="utf-8")
+        # dry-run still exits non-zero (there ARE issues to fix).
+        r = self._run_cli("fix", "--dir", str(tmp_path), "--dry-run")
+        assert r.returncode == 1, r.stderr
+        # But the file is untouched.
+        assert bad.read_text(encoding="utf-8") == before
+
+    def test_report_writes_html(self, tmp_path):
+        self._copy_fixture_into("good.svg", tmp_path)
+        out_html = tmp_path / "report.html"
+        r = self._run_cli("report", "--dir", str(tmp_path), "--output", str(out_html))
+        assert r.returncode == 0, r.stderr
+        assert out_html.exists()
+        assert "SVG Guard Report" in out_html.read_text(encoding="utf-8")

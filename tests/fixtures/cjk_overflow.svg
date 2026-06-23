@@ -1,0 +1,4 @@
+<svg viewBox="0 0 400 200" width="400" height="200" xmlns="http://www.w3.org/2000/svg">
+  <rect x="10" y="10" width="120" height="40" fill="#eee" stroke="#999"/>
+  <text x="15" y="35" font-family="sans-serif" font-size="16">中文标签测试文字溢出场景</text>
+</svg>

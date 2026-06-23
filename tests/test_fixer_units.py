@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from svg_guard.checker import check_svg
+from svg_guard.checker import check_svg, Issue
 from svg_guard.fixer import (
     _expand_viewbox,
     _fix_card,
@@ -259,6 +259,9 @@ class TestMultiIssueRectRegression:
 class TestOrphanTextRegression:
     def test_right_overflow_widens_canvas(self, page, tmp_path):
         # B5: orphan text overflowing the right edge should expand the viewBox.
+        # This browser-driven test verifies the END-TO-END path (detect → fix),
+        # but its assertion depends on font metrics; the deterministic sibling
+        # test below locks the fixer behaviour without a browser.
         svg_path = _copy_fixture("orphan_text_right.svg", tmp_path)
         result = check_svg(page, svg_path)
         orphan = [i for i in result.issues if i.type == "text_viewbox"]
@@ -270,3 +273,209 @@ class TestOrphanTextRegression:
         assert modified != original
         # The viewBox width (300) should have grown.
         assert 'viewBox="0 0 300 ' not in modified
+
+    def test_orphan_text_viewbox_widening_is_deterministic(self, tmp_path):
+        # Deterministic regression for the orphan-text fix path: construct the
+        # Issue by hand and feed it to fix_svg, so the viewBox widening is
+        # verified regardless of which fonts the host has installed. This
+        # protects the B5 fix path from silently disappearing if the browser
+        # test above starts skipping due to a font change.
+        svg = (
+            '<svg viewBox="0 0 300 100" width="300" height="100">'
+            '<text x="290" y="50">past the right edge</text>'
+            "</svg>"
+        )
+        svg_path = tmp_path / "orphan.svg"
+        svg_path.write_text(svg, encoding="utf-8")
+
+        # An orphan text overflowing +50px to the right and +0 to the bottom.
+        issue = Issue(
+            type="text_viewbox",
+            text="past the right edge",
+            direction="right",
+            svg={"x": 290, "y": 30, "w": 60, "h": 20},
+            parent={},
+            fix={"expand_viewbox_w": 50, "expand_viewbox_h": 0},
+        )
+        changes = fix_svg(svg_path, [issue], backup=False)
+        assert changes, "fixer should report at least one change"
+        modified = svg_path.read_text(encoding="utf-8")
+        # viewBox width grew from 300 to 350; root width follows.
+        assert 'viewBox="0 0 350 100"' in modified
+        assert 'width="350"' in modified
+
+    def test_orphan_text_bottom_overflow_widens_height(self, tmp_path):
+        # Same idea, vertical: orphan text below the viewBox bottom edge.
+        svg = (
+            '<svg viewBox="0 0 300 100" width="300" height="100">'
+            '<text x="10" y="95">below the bottom edge</text>'
+            "</svg>"
+        )
+        svg_path = tmp_path / "orphan_bottom.svg"
+        svg_path.write_text(svg, encoding="utf-8")
+
+        issue = Issue(
+            type="text_viewbox",
+            text="below the bottom edge",
+            direction="bottom",
+            svg={"x": 10, "y": 85, "w": 100, "h": 40},
+            parent={},
+            fix={"expand_viewbox_w": 0, "expand_viewbox_h": 40},
+        )
+        changes = fix_svg(svg_path, [issue], backup=False)
+        assert changes
+        modified = svg_path.read_text(encoding="utf-8")
+        assert 'viewBox="0 0 300 140"' in modified
+        assert 'height="140"' in modified
+
+
+# ── fix_svg integration behaviour (no browser) ────────────────────────────
+
+
+class TestFixSvgBehaviour:
+    """End-to-end fix_svg behaviour using hand-built SVGs and Issues.
+
+    No browser involved: these lock down the dispatching, grouping, dry_run
+    and backup semantics that the browser-driven regression tests above don't
+    cover in isolation.
+    """
+
+    def _write(self, tmp_path: Path, name: str, content: str) -> Path:
+        p = tmp_path / name
+        p.write_text(content, encoding="utf-8")
+        return p
+
+    def test_dry_run_does_not_write(self, tmp_path):
+        svg = (
+            '<svg viewBox="0 0 400 200" width="400" height="200">'
+            '<rect x="10" y="10" width="150" height="40"/>'
+            "</svg>"
+        )
+        svg_path = self._write(tmp_path, "a.svg", svg)
+        before = svg_path.read_text(encoding="utf-8")
+
+        issue = Issue(
+            type="text_rect",
+            text="x",
+            direction="right",
+            svg={"x": 10, "y": 10, "w": 200, "h": 40},
+            parent={"attrs": {"x": "10", "y": "10", "width": "150", "height": "40"}},
+            fix={"expand_w": 30, "expand_h": 0},
+        )
+        changes = fix_svg(svg_path, [issue], backup=False, dry_run=True)
+        assert changes  # dry_run still reports what WOULD change
+        # ...but the file on disk must be untouched.
+        assert svg_path.read_text(encoding="utf-8") == before
+
+    def test_backup_creates_bak_file(self, tmp_path):
+        svg = (
+            '<svg viewBox="0 0 400 200" width="400" height="200">'
+            '<rect x="10" y="10" width="150" height="40"/>'
+            "</svg>"
+        )
+        svg_path = self._write(tmp_path, "a.svg", svg)
+
+        issue = Issue(
+            type="text_rect",
+            text="x",
+            direction="right",
+            svg={"x": 10, "y": 10, "w": 200, "h": 40},
+            parent={"attrs": {"x": "10", "y": "10", "width": "150", "height": "40"}},
+            fix={"expand_w": 30, "expand_h": 0},
+        )
+        fix_svg(svg_path, [issue], backup=True)
+        assert (tmp_path / "a.svg.bak").exists()
+        # Backup holds the ORIGINAL content.
+        assert (tmp_path / "a.svg.bak").read_text(encoding="utf-8") == svg
+
+    def test_no_backup_when_disabled(self, tmp_path):
+        svg = (
+            '<svg viewBox="0 0 400 200" width="400" height="200">'
+            '<rect x="10" y="10" width="150" height="40"/>'
+            "</svg>"
+        )
+        svg_path = self._write(tmp_path, "a.svg", svg)
+        issue = Issue(
+            type="text_rect",
+            text="x",
+            direction="right",
+            svg={"x": 10, "y": 10, "w": 200, "h": 40},
+            parent={"attrs": {"x": "10", "y": "10", "width": "150", "height": "40"}},
+            fix={"expand_w": 30, "expand_h": 0},
+        )
+        fix_svg(svg_path, [issue], backup=False)
+        assert not (tmp_path / "a.svg.bak").exists()
+
+    def test_mixed_issue_types_applied_together(self, tmp_path):
+        # One text_rect (widen rect) + one rect_viewbox (widen viewBox) hitting
+        # a DIFFERENT rect: both must be applied in a single fix_svg pass.
+        svg = (
+            '<svg viewBox="0 0 500 300" width="500" height="300">'
+            '<rect x="10" y="10" width="150" height="40"/>'
+            '<rect x="10" y="100" width="600" height="40"/>'  # wider than viewBox
+            "</svg>"
+        )
+        svg_path = self._write(tmp_path, "a.svg", svg)
+
+        text_issue = Issue(
+            type="text_rect",
+            text="x",
+            direction="right",
+            svg={"x": 10, "y": 10, "w": 200, "h": 40},
+            parent={"attrs": {"x": "10", "y": "10", "width": "150", "height": "40"}},
+            fix={"expand_w": 30, "expand_h": 0},
+        )
+        vb_issue = Issue(
+            type="rect_viewbox",
+            text='rect fill="#fff"',
+            direction="right",
+            svg={"x": 10, "y": 100, "w": 600, "h": 40},
+            parent={
+                "domIndex": 1,
+                "attrs": {"x": "10", "y": "100", "width": "600", "height": "40"},
+            },
+            fix={"expand_viewbox_w": 120, "expand_viewbox_h": 0},
+        )
+        changes = fix_svg(svg_path, [text_issue, vb_issue], backup=False)
+        assert changes  # both issue types should produce at least one change
+        modified = svg_path.read_text(encoding="utf-8")
+        # text_rect widened the 150 rect to 180.
+        assert 'rect x="10" y="10" width="180"' in modified
+        # rect_viewbox widened the viewBox from 500 to 620.
+        assert 'viewBox="0 0 620 300"' in modified
+
+    def test_grouped_issues_collapse_to_one_change(self, tmp_path):
+        # Two text_rect issues hitting the SAME rect must produce a single
+        # widening to max(expand), not two separate writes.
+        svg = (
+            '<svg viewBox="0 0 400 200" width="400" height="200">'
+            '<rect x="10" y="10" width="200" height="40"/>'
+            "</svg>"
+        )
+        svg_path = self._write(tmp_path, "a.svg", svg)
+        attrs = {"x": "10", "y": "10", "width": "200", "height": "40"}
+        issues = [
+            Issue(
+                type="text_rect",
+                text="a",
+                direction="right",
+                svg={"x": 10, "y": 10, "w": 230, "h": 40},
+                parent={"attrs": attrs},
+                fix={"expand_w": 30, "expand_h": 0},
+            ),
+            Issue(
+                type="text_rect",
+                text="b",
+                direction="right",
+                svg={"x": 10, "y": 10, "w": 260, "h": 40},
+                parent={"attrs": attrs},
+                fix={"expand_w": 60, "expand_h": 0},
+            ),
+        ]
+        changes = fix_svg(svg_path, issues, backup=False)
+        assert changes  # collapsed into a single widening change
+        modified = svg_path.read_text(encoding="utf-8")
+        # Final width = 200 + max(30, 60) = 260.
+        assert 'width="260"' in modified
+        assert 'width="230"' not in modified
+        assert 'width="290"' not in modified

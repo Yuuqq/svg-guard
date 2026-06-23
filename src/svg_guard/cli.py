@@ -147,8 +147,12 @@ def _cmd_report(args: argparse.Namespace) -> None:
     results, _ = check_directory(args.dir)
     path = generate_report(results, args.output)
     print(f"Report saved to {path}")
+    # Mirror the other subcommands: always exit through sys.exit so the exit
+    # code contract is uniform whether main() runs as a process or is invoked
+    # in-process by tests.
     if _has_render_errors(results):
         sys.exit(2)
+    sys.exit(0)
 
 
 if __name__ == "__main__":
