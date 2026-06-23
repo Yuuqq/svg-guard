@@ -1,0 +1,8 @@
+<svg viewBox="0 0 800 200" width="800" height="200" xmlns="http://www.w3.org/2000/svg">
+  <!-- viewBox aspect ratio (4:1) differs sharply from the 1600x1200 (4:3)
+       viewport. The old gBCR-based code used independent scaleX/scaleY and
+       skewed rect_viewbox detection. New user-unit measurement is viewport-
+       independent. The rect fits exactly within the viewBox (no overflow). -->
+  <rect x="10" y="10" width="780" height="180" fill="#f0fdf4" stroke="#86efac"/>
+  <text x="400" y="105" text-anchor="middle" font-family="sans-serif" font-size="16">fits within wide viewBox</text>
+</svg>

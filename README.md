@@ -103,14 +103,32 @@ results, total = check_directory("./images", verbose=True, json_out="report.json
 ## How It Works
 
 1. **Render** — Each SVG is loaded into a headless Chromium page via Playwright
-2. **Measure** — `getBoundingClientRect()` gives exact rendered bounds for every `<text>` and `<rect>` element
+2. **Measure** — `getBBox()` + `getCTM()` give each element's bounds in the SVG's own user units (viewBox space), correctly accumulating transforms like `rotate` and nested `<svg>`. This is viewport-independent: results don't shift when the browser window is resized.
 3. **Associate** — Each text element is matched to its nearest parent rect by center-point containment
 4. **Detect** — Two phases:
    - **Phase 1**: text extends beyond its parent rect → `text_rect` issue
    - **Phase 2**: rect extends beyond the SVG viewBox → `rect_viewbox` issue
-5. **Fix** — For each issue, the SVG source is patched using regex (preserves formatting):
-   - ViewBox overflow → increases `viewBox` dimensions
+5. **Fix** — For each issue, the SVG source is patched (preserving formatting):
+   - ViewBox overflow → increases `viewBox` dimensions (and the root `<svg>` width/height)
    - Card overflow → increases the rect's `width`/`height` attributes
+
+### Tuning detection
+
+All thresholds live in `DetectionConfig` (in user units, not CSS pixels) and can be passed to `check_svg` / `check_directory`:
+
+```python
+from svg_guard import DetectionConfig, check_svg
+
+# Stricter: flag text that's even slightly snug, consider small rects too
+cfg = DetectionConfig(pad=1.0, min_rect_w=20.0, min_rect_h=20.0)
+result = check_svg(page, Path("diagram.svg"), config=cfg)
+```
+
+### Limitations
+
+- **Left/top text overflow is reported but not auto-fixed.** Widening a rect grows it toward the bottom-right, so it can never cover text that starts *before* the rect's left/top edge; auto-fixing would loop forever re-expanding. Such issues are flagged `fixable=false` and the fixer skips them with a clear message — move the text manually.
+- **Rotated elements** are measured by their axis-aligned bounding box in viewBox space (transforms are correctly accumulated via `getCTM`). Exact rotated-region containment (a rotated rect with text rotated differently) is approximated, not polygon-precise.
+- **CJK fonts in CI**: headless Chromium on a Linux runner has no CJK fonts by default, so Chinese/Japanese text may measure differently than on your machine. Install a CJK font (`fonts-noto-cjk` on Debian/Ubuntu) in CI for consistent results.
 
 ## Why Not Heuristics?
 

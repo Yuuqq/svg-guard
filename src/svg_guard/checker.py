@@ -7,36 +7,70 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+# Detection thresholds. Exposed via DetectionConfig (Python) and injected into
+# the JS probe as a JSON object so they are no longer hard-coded magic numbers
+# inside the JS string. All values are in SVG USER UNITS (viewBox space), not
+# CSS pixels — measuring in user units is what makes the results independent of
+# the browser viewport size (the old code scaled by viewport and was wrong
+# whenever the viewBox aspect ratio differed from the viewport's).
 JS_DETECT = r"""
-() => {
+(cfg) => {
   const results = [];
   const svg = document.querySelector('svg');
   if (!svg) return { issues: [], viewBox: null };
 
   const vb = svg.viewBox.baseVal;
-  const sr = svg.getBoundingClientRect();
   const svgW = vb.width || parseFloat(svg.getAttribute('width')) || svg.clientWidth;
   const svgH = vb.height || parseFloat(svg.getAttribute('height')) || svg.clientHeight;
-  const scaleX = svgW / sr.width;
-  const scaleY = svgH / sr.height;
 
+  // getUserBox(el): return the element's axis-aligned bounding box in the
+  // ROOT svg's user coordinate system (viewBox space), INCLUDING any
+  // transforms applied to the element or its ancestors.
+  //
+  // getBoundingClientRect() (the old approach) returns CSS pixels and is
+  // distorted by viewport scaling — when the viewBox aspect ratio differs
+  // from the viewport's, scaleX != scaleY and every downstream comparison is
+  // skewed. getBBox() returns user units in the element's LOCAL coordinate
+  // system (no transforms); we then fold in getCTM() (local -> root svg user
+  // units, accumulating all transforms incl. nested <svg> and rotate) to land
+  // in a single consistent space. No viewport scaling is involved at all.
+  function getUserBox(el) {
+    let bb;
+    try {
+      bb = el.getBBox();  // local user units, no transform
+    } catch (e) {
+      return null;  // not rendered / detached — skip this element
+    }
+    const ctm = el.getCTM();  // null when el IS the viewport (root svg)
+    if (!ctm) return { x: bb.x, y: bb.y, w: bb.width, h: bb.height };
+    // getCTM() returns an SVGMatrix (a,b,c,d,e,f) with NO transformPoint
+    // method (that's on DOMMatrix). Apply it manually to each corner:
+    //   x' = a*x + c*y + e ,  y' = b*x + d*y + f
+    const tx = (x, y) => ({ x: ctm.a * x + ctm.c * y + ctm.e,
+                            y: ctm.b * x + ctm.d * y + ctm.f });
+    const p1 = tx(bb.x, bb.y);
+    const p2 = tx(bb.x + bb.width, bb.y);
+    const p3 = tx(bb.x, bb.y + bb.height);
+    const p4 = tx(bb.x + bb.width, bb.y + bb.height);
+    const xs = [p1.x, p2.x, p3.x, p4.x];
+    const ys = [p1.y, p2.y, p3.y, p4.y];
+    const x = Math.min(...xs), y = Math.min(...ys);
+    return { x, y, w: Math.max(...xs) - x, h: Math.max(...ys) - y };
+  }
+
+  // Collect candidate container rects (in viewBox user units).
   const allRects = [...svg.querySelectorAll('rect')];
   const boxes = [];
-
   for (let i = 0; i < allRects.length; i++) {
     const rect = allRects[i];
-    const r = rect.getBoundingClientRect();
-    if (r.width < 80 || r.height < 40) continue;
+    const box = getUserBox(rect);
+    if (!box) continue;
+    // Skip tiny rects (decorative dots, dividers) — threshold is in user units
+    // so it doesn't shift with viewport zoom like the old CSS-pixel filter.
+    if (box.w < cfg.minRectW || box.h < cfg.minRectH) continue;
     boxes.push({
-      el: rect,
       domIndex: i,
-      px: { x: r.x, y: r.y, w: r.width, h: r.height },
-      svg: {
-        x: (r.x - sr.x) * scaleX,
-        y: (r.y - sr.y) * scaleY,
-        w: r.width * scaleX,
-        h: r.height * scaleY
-      },
+      svg: box,
       attrs: {
         x: rect.getAttribute('x') || '0',
         y: rect.getAttribute('y') || '0',
@@ -48,28 +82,33 @@ JS_DETECT = r"""
     });
   }
 
-  const pad = 3;
+  const pad = cfg.pad;
 
+  // Phase 1: text -> parent rect overflow.
   for (const txt of svg.querySelectorAll('text')) {
-    const bbox = txt.getBoundingClientRect();
-    const cx = bbox.x + bbox.width / 2;
-    const cy = bbox.y + bbox.height / 2;
+    const bbox = getUserBox(txt);
+    if (!bbox) continue;
+    const cx = bbox.x + bbox.w / 2;
+    const cy = bbox.y + bbox.h / 2;
 
+    // Match text to its containing rect by center-point containment.
+    // All comparisons are now in viewBox user units (no viewport scaling).
     let parent = null;
     for (const box of boxes) {
-      if (cx >= box.px.x && cx <= box.px.x + box.px.w &&
-          cy >= box.px.y && cy <= box.px.y + box.px.h) {
+      if (cx >= box.svg.x && cx <= box.svg.x + box.svg.w &&
+          cy >= box.svg.y && cy <= box.svg.y + box.svg.h) {
         parent = box;
         break;
       }
     }
 
     if (!parent) {
-      const edgePad = 4;
-      const oL = bbox.x < sr.x + edgePad;
-      const oR = bbox.x + bbox.width > sr.x + sr.width - edgePad;
-      const oT = bbox.y < sr.y + edgePad;
-      const oB = bbox.y + bbox.height > sr.y + sr.height - edgePad;
+      // Orphan text: no containing rect. Only flag if it spills the viewBox.
+      const edgePad = cfg.edgePad;
+      const oL = bbox.x < 0 + edgePad;
+      const oR = bbox.x + bbox.w > svgW - edgePad;
+      const oT = bbox.y < 0 + edgePad;
+      const oB = bbox.y + bbox.h > svgH - edgePad;
       if (oL || oR || oT || oB) {
         const dirs = [];
         if (oL) dirs.push('left');
@@ -78,27 +117,26 @@ JS_DETECT = r"""
         if (oB) dirs.push('bottom');
         results.push({
           type: 'text_viewbox',
-          text: txt.textContent.trim().substring(0, 80),
+          text: _clip(txt.textContent),
           direction: dirs.join('+'),
-          svg: _r({ x: (bbox.x - sr.x) * scaleX, y: (bbox.y - sr.y) * scaleY,
-                    w: bbox.width * scaleX, h: bbox.height * scaleY }),
+          svg: _r(bbox),
           parent: { viewBox: { w: Math.round(svgW), h: Math.round(svgH) } },
           fix: {
-            // Right/bottom overflow can be fixed by enlarging the canvas.
-            expand_viewbox_w: oR
-              ? Math.round((bbox.x + bbox.width - sr.x) * scaleX - svgW + 4) : 0,
-            expand_viewbox_h: oB
-              ? Math.round((bbox.y + bbox.height - sr.y) * scaleY - svgH + 4) : 0
+            // Only right/bottom overflow can be resolved by enlarging the
+            // canvas; left/top needs the text moved, which we can't do safely.
+            expand_viewbox_w: oR ? Math.round(bbox.x + bbox.w - svgW + cfg.fixPad) : 0,
+            expand_viewbox_h: oB ? Math.round(bbox.y + bbox.h - svgH + cfg.fixPad) : 0
           }
         });
       }
       continue;
     }
 
-    const oL = bbox.x < parent.px.x - pad;
-    const oR = bbox.x + bbox.width > parent.px.x + parent.px.w + pad;
-    const oT = bbox.y < parent.px.y - pad;
-    const oB = bbox.y + bbox.height > parent.px.y + parent.px.h + pad;
+    const px = parent.svg;
+    const oL = bbox.x < px.x - pad;
+    const oR = bbox.x + bbox.w > px.x + px.w + pad;
+    const oT = bbox.y < px.y - pad;
+    const oB = bbox.y + bbox.h > px.y + px.h + pad;
 
     if (oL || oR || oT || oB) {
       const dirs = [];
@@ -107,31 +145,42 @@ JS_DETECT = r"""
       if (oT) dirs.push('top');
       if (oB) dirs.push('bottom');
 
-      const extraW = Math.max(oL ? (parent.px.x - pad) - bbox.x : 0,
-                               oR ? (bbox.x + bbox.width) - (parent.px.x + parent.px.w + pad) : 0);
-      const extraH = Math.max(oT ? (parent.px.y - pad) - bbox.y : 0,
-                               oB ? (bbox.y + bbox.height) - (parent.px.y + parent.px.h + pad) : 0);
+      // Expanding a rect's width/height grows it toward the bottom-right.
+      // That can only COVER right/bottom overflow; left/top overflow (text
+      // starts before the rect's left/top edge) would remain no matter how
+      // wide/tall the rect gets, so re-checking after a fix would re-report
+      // the same left/top issue forever (a fix loop). Mark such issues as
+      // not auto-fixable so the fixer skips them with a clear message
+      // instead of churning the file.
+      const fixable = !oL && !oT;
+      const extraW = fixable
+        ? Math.max(0, (bbox.x + bbox.w) - (px.x + px.w + pad))
+        : 0;
+      const extraH = fixable
+        ? Math.max(0, (bbox.y + bbox.h) - (px.y + px.h + pad))
+        : 0;
 
       results.push({
         type: 'text_rect',
-        text: txt.textContent.trim().substring(0, 80),
+        text: _clip(txt.textContent),
         direction: dirs.join('+'),
-        svg: _r({ x: (bbox.x - sr.x) * scaleX, y: (bbox.y - sr.y) * scaleY,
-                  w: bbox.width * scaleX, h: bbox.height * scaleY }),
+        svg: _r(bbox),
         parent: {
           domIndex: parent.domIndex,
           svg: _r(parent.svg),
           attrs: parent.attrs
         },
         fix: {
-          expand_w: Math.round(extraW * scaleX) + 4,
-          expand_h: Math.round(extraH * scaleY) + 4
+          expand_w: Math.round(extraW) + (fixable ? cfg.fixPad : 0),
+          expand_h: Math.round(extraH) + (fixable ? cfg.fixPad : 0),
+          fixable: fixable
         }
       });
     }
   }
 
-  const vpad = 2;
+  // Phase 2: rect -> viewBox overflow.
+  const vpad = cfg.vpad;
   for (const box of boxes) {
     const rx = box.svg.x;
     const ry = box.svg.y;
@@ -154,13 +203,20 @@ JS_DETECT = r"""
         svg: _r(box.svg),
         parent: { viewBox: svgW + 'x' + svgH },
         fix: {
-          expand_viewbox_w: oR ? Math.round(rx + box.svg.w - svgW + 10) : 0,
-          expand_viewbox_h: oB ? Math.round(ry + box.svg.h - svgH + 10) : 0
+          // Only right/bottom overflow is canvas-fixable.
+          expand_viewbox_w: oR ? Math.round(rx + box.svg.w - svgW + cfg.vboxFixPad) : 0,
+          expand_viewbox_h: oB ? Math.round(ry + box.svg.h - svgH + cfg.vboxFixPad) : 0
         }
       });
     }
   }
 
+  // Clip text to a safe number of code units, splitting on surrogate pairs so
+  // we never emit a lone half of an emoji into the JSON report.
+  function _clip(s) {
+    const t = (s || '').trim();
+    return Array.from(t).slice(0, 80).join('');
+  }
   function _r(o) {
     return { x: Math.round(o.x), y: Math.round(o.y),
              w: Math.round(o.w), h: Math.round(o.h) };
@@ -209,14 +265,58 @@ class CheckResult:
         return self.error is None and len(self.issues) == 0
 
 
-def check_svg(page, svg_path: Path) -> CheckResult:
+@dataclass
+class DetectionConfig:
+    """Detection thresholds, all in SVG USER UNITS (viewBox space).
+
+    Centralising these (instead of hard-coding them inside the JS probe)
+    makes the detector tunable for tight icon layouts, poster-size diagrams,
+    etc. Defaults match the behaviour before this config existed.
+    """
+
+    # Tolerance when deciding whether text overflows its parent rect.
+    pad: float = 3.0
+    # Tolerance for orphan text spilling the viewBox edge.
+    edge_pad: float = 4.0
+    # Tolerance for a rect itself overflowing the viewBox.
+    vpad: float = 2.0
+    # Extra px added to a card-expand fix so the text clears the edge.
+    fix_pad: float = 4.0
+    # Extra px added to a viewBox-expand fix (rect_viewbox).
+    vbox_fix_pad: float = 10.0
+    # Rects smaller than this (in user units) are treated as decorative and
+    # ignored as candidate parent containers.
+    min_rect_w: float = 80.0
+    min_rect_h: float = 40.0
+    # Browser viewport for rendering. Large enough that typical viewBoxes are
+    # rendered near 1:1, minimising subpixel rounding.
+    viewport_w: int = 1600
+    viewport_h: int = 1200
+
+    def as_js(self) -> dict:
+        """Serialize to the plain object the JS probe expects."""
+        return {
+            "pad": self.pad,
+            "edgePad": self.edge_pad,
+            "vpad": self.vpad,
+            "fixPad": self.fix_pad,
+            "vboxFixPad": self.vbox_fix_pad,
+            "minRectW": self.min_rect_w,
+            "minRectH": self.min_rect_h,
+        }
+
+
+def check_svg(
+    page, svg_path: Path, *, config: DetectionConfig | None = None
+) -> CheckResult:
     """Check a single SVG for text and rect overflow."""
+    cfg = config or DetectionConfig()
     svg_path = Path(svg_path).resolve()
     file_url = svg_path.as_uri()
     page.goto(file_url, wait_until="load")
     page.wait_for_timeout(200)
 
-    raw: dict[str, Any] = page.evaluate(JS_DETECT)
+    raw: dict[str, Any] = page.evaluate(JS_DETECT, cfg.as_js())
     issues = [Issue.from_raw(r) for r in raw.get("issues", [])]
     return CheckResult(path=svg_path, issues=issues, viewBox=raw.get("viewBox"))
 
@@ -226,10 +326,12 @@ def check_directory(
     *,
     verbose: bool = False,
     json_out: Path | str | None = None,
+    config: DetectionConfig | None = None,
 ) -> tuple[dict[str, CheckResult], int]:
     """Check all SVGs in a directory. Returns (results, total_issues)."""
     from playwright.sync_api import sync_playwright
 
+    cfg = config or DetectionConfig()
     svg_dir = Path(svg_dir).resolve()
     if not svg_dir.is_dir():
         raise FileNotFoundError(f"Directory not found: {svg_dir}")
@@ -246,11 +348,13 @@ def check_directory(
 
     with sync_playwright() as p:
         browser = p.chromium.launch()
-        page = browser.new_page(viewport={"width": 1600, "height": 1200})
+        page = browser.new_page(
+            viewport={"width": cfg.viewport_w, "height": cfg.viewport_h}
+        )
 
         for svg_path in svg_files:
             try:
-                result = check_svg(page, svg_path)
+                result = check_svg(page, svg_path, config=cfg)
             except Exception as e:
                 # Record the failure ON the result so callers (CLI, JSON report)
                 # can tell a broken file from a clean one. ok becomes False.

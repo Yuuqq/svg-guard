@@ -68,10 +68,23 @@ def fix_svg(
     # the same rect; collapse them by parent identity, taking the max delta in
     # each direction so nothing is silently under-fixed (and so the second
     # issue isn't left looking for an already-rewritten width="...").
+    #
+    # Left/top text overflow (text starts before the rect's left/top edge) is
+    # NOT auto-fixable — widening the rect grows it toward the bottom-right and
+    # can never cover text that's to the left/above it, so re-checking would
+    # re-report the same issue forever (a fix loop). The checker marks such
+    # issues fix=false; here we surface them as skipped with a clear reason
+    # instead of churning the file.
     grouped: dict[tuple[str, str], dict[str, float | dict]] = {}
     order: list[tuple[str, str]] = []
     for issue in issues:
         if issue.type != "text_rect":
+            continue
+        if issue.fix.get("fixable") is False:
+            changes.append(
+                f'text "{(issue.text or "").strip()[:40]}" skipped: '
+                f"left/top overflow needs manual repositioning"
+            )
             continue
         attrs = issue.parent.get("attrs", {})
         key = (attrs.get("x", ""), attrs.get("y", ""))

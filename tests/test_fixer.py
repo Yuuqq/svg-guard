@@ -59,6 +59,38 @@ class TestFixCard:
         assert len(result2.issues) <= before_count
 
 
+class TestFixUnfixableLeftOverflow:
+    def test_left_overflow_is_skipped_not_looped(self, page, tmp_path):
+        # Text starting left of its rect can't be fixed by widening (which
+        # grows rightward). The fixer must SKIP it with a clear message and
+        # NOT churn the rect — otherwise re-checking would re-report it
+        # forever (a fix loop). This is the key anti-regression for the
+        # "text_rect fixable=false" path.
+        svg_path = _copy_fixture("text_overflow_left.svg", tmp_path)
+        result = check_svg(page, svg_path)
+        assert not result.ok
+        unfixable = [i for i in result.issues if i.fix.get("fixable") is False]
+        assert unfixable, "fixture should produce an unfixable left-overflow issue"
+
+        changes = fix_svg(svg_path, result.issues, backup=False)
+        # A skip message is reported...
+        assert any("skipped" in c and "left/top" in c for c in changes)
+        # ...but the file's rect geometry is unchanged (no widening applied).
+        modified = svg_path.read_text(encoding="utf-8")
+        assert 'width="200"' in modified  # original width preserved
+
+    def test_unfixable_does_not_increase_issues_on_recheck(self, page, tmp_path):
+        # The anti-loop guarantee: after fixing, re-checking must not report
+        # MORE issues than before (the unfixable one stays, but nothing new
+        # appears and no rect was mis-widened).
+        svg_path = _copy_fixture("text_overflow_left.svg", tmp_path)
+        result1 = check_svg(page, svg_path)
+        before = len(result1.issues)
+        fix_svg(svg_path, result1.issues, backup=False)
+        result2 = check_svg(page, svg_path)
+        assert len(result2.issues) <= before
+
+
 class TestFixBackup:
     def test_backup_created_by_default(self, page, tmp_path):
         svg_path = _copy_fixture("text_overflow.svg", tmp_path)

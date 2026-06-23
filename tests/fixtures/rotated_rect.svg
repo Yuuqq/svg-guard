@@ -1,0 +1,8 @@
+<svg viewBox="0 0 400 200" width="400" height="200" xmlns="http://www.w3.org/2000/svg">
+  <!-- A rect rotated 45deg. Its axis-aligned bounding box (in viewBox space)
+       is larger than the un-rotated geometry. Detection must not crash and
+       must reason in the post-transform space. -->
+  <rect x="100" y="60" width="120" height="80" fill="#e0e7ff" stroke="#6366f1"
+        transform="rotate(45 160 100)"/>
+  <text x="120" y="100" font-family="sans-serif" font-size="18">rotated card</text>
+</svg>

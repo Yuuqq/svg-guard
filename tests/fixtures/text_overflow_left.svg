@@ -1,0 +1,8 @@
+<svg viewBox="0 0 400 200" width="400" height="200" xmlns="http://www.w3.org/2000/svg">
+  <!-- Text starts to the LEFT of the rect's left edge (x=80 < rect x=120).
+       This is not auto-fixable by widening the rect (which grows rightward),
+       so the checker must mark it fixable=false and the fixer must skip it
+       rather than loop forever re-expanding. -->
+  <rect x="120" y="50" width="200" height="60" fill="#fee2e2" rx="8"/>
+  <text x="80" y="85" font-family="sans-serif" font-size="18">text starting left of box</text>
+</svg>
