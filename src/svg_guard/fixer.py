@@ -75,8 +75,8 @@ def fix_svg(
     # re-report the same issue forever (a fix loop). The checker marks such
     # issues fix=false; here we surface them as skipped with a clear reason
     # instead of churning the file.
-    grouped: dict[tuple[str, str], dict[str, float | dict]] = {}
-    order: list[tuple[str, str]] = []
+    grouped: dict[tuple, dict] = {}
+    order: list[tuple] = []
     for issue in issues:
         if issue.type != "text_rect":
             continue
@@ -87,9 +87,22 @@ def fix_svg(
             )
             continue
         attrs = issue.parent.get("attrs", {})
-        key = (attrs.get("x", ""), attrs.get("y", ""))
+        dom_index = issue.parent.get("domIndex")
+        # Group by domIndex when available (uniquely identifies the rect even
+        # if several share identical x/y); fall back to (x, y) otherwise.
+        key = (
+            dom_index
+            if dom_index is not None
+            else (attrs.get("x", ""), attrs.get("y", ""))
+        )
         slot = grouped.setdefault(
-            key, {"expand_w": 0.0, "expand_h": 0.0, "attrs": attrs}
+            key,
+            {
+                "expand_w": 0.0,
+                "expand_h": 0.0,
+                "attrs": attrs,
+                "dom_index": dom_index,
+            },
         )
         if key not in order:
             order.append(key)
@@ -99,7 +112,11 @@ def fix_svg(
     for key in order:
         slot = grouped[key]
         content, change = _fix_card(
-            content, slot["attrs"], slot["expand_w"], slot["expand_h"]
+            content,
+            slot["attrs"],
+            slot["expand_w"],
+            slot["expand_h"],
+            dom_index=slot["dom_index"],
         )
         if change:
             changes.append(change)
@@ -263,15 +280,24 @@ def _fix_card(
     attrs: dict,
     expand_w: float,
     expand_h: float,
+    *,
+    dom_index: int | None = None,
 ) -> tuple[str, str | None]:
     """Expand the rect identified by ``attrs`` (x/y/width/height).
 
-    Identifies the target rect by matching a *fingerprint* of several
-    attributes (x, y, width, height, fill) parsed as proper ``key="value"``
-    tokens, not as substrings. This avoids two known mis-fixes:
+    Identifies the target rect by:
 
-      * two rects sharing the same x/y (e.g. background + card layer) used to
-        collapse onto one slot and only the first was ever widened;
+      1. ``dom_index`` (preferred when given): the Nth ``<rect>`` in document
+         order, matching the checker's ``querySelectorAll('rect')`` indexing.
+         This uniquely identifies a rect even when several share identical
+         x/y/width/height/fill (e.g. a background layer + a card layer).
+      2. A *fingerprint* of several attributes (x, y, width, height, fill)
+         parsed as proper ``key="value"`` tokens, not substrings. Used as the
+         locator when dom_index is absent, and as a sanity check otherwise.
+
+    Avoids two known mis-fixes:
+      * two rects sharing the same x/y used to collapse onto one slot and
+        only the first was ever widened;
       * ``x="10"`` substring-matched inside ``transform="translate(10,…)"``.
 
     Supports both double- and single-quoted attribute values.
@@ -326,11 +352,28 @@ def _fix_card(
 
     # Match a <rect …> open tag (covers both self-closing and open-close forms,
     # since width/height always live on the open tag).
-    for m in re.finditer(r"<rect\b[^>]*>", content):
+    for rect_n, m in enumerate(re.finditer(r"<rect\b[^>]*>", content)):
         tag = m.group()
 
-        if not all(attr_value(tag, k) == v for k, v in fingerprint):
-            continue
+        # When we have a dom_index, locate the rect by position (matching the
+        # checker's querySelectorAll('rect') order) and use the fingerprint
+        # only as a sanity check. Without dom_index, fall back to matching the
+        # first rect whose fingerprint matches.
+        if dom_index is not None:
+            if rect_n != dom_index:
+                continue
+            # Sanity: the Nth rect should still carry the attrs we expect. If
+            # the SVG was hand-edited between check and fix, refuse rather than
+            # widen the wrong rect.
+            if not all(attr_value(tag, k) == v for k, v in fingerprint):
+                return (
+                    content,
+                    f"rect[{dom_index}] skipped: attrs no longer match "
+                    f"(file changed since check?)",
+                )
+        else:
+            if not all(attr_value(tag, k) == v for k, v in fingerprint):
+                continue
 
         new_tag = tag
         parts: list[str] = []
@@ -361,6 +404,11 @@ def _fix_card(
             return content, None
 
         new_content = content[: m.start()] + new_tag + content[m.end() :]
-        return new_content, f"rect({target_x},{target_y}) {' '.join(parts)}"
+        label = (
+            f"rect[{dom_index}]"
+            if dom_index is not None
+            else f"rect({target_x},{target_y})"
+        )
+        return new_content, f"{label} {' '.join(parts)}"
 
     return content, None

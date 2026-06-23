@@ -39,6 +39,36 @@ class TestCheckDirectoryPureLogic:
             check_directory(tmp_path)
 
 
+class TestBrowserRunnerContract:
+    """Structural checks on BrowserRunner that need no real browser.
+
+    The full launch/teardown path is exercised end-to-end by every
+    check_directory call (it builds a BrowserRunner internally); here we
+    only lock the public surface so library users can rely on it.
+    """
+
+    def test_default_config_when_none(self):
+        from svg_guard.checker import BrowserRunner, DetectionConfig
+
+        r = BrowserRunner()
+        assert isinstance(r.config, DetectionConfig)
+        # Defaults are the shipped ones.
+        assert r.config.viewport_w == 1600 and r.config.viewport_h == 1200
+
+    def test_uses_provided_config(self):
+        from svg_guard.checker import BrowserRunner, DetectionConfig
+
+        cfg = DetectionConfig(viewport_w=800, viewport_h=600)
+        r = BrowserRunner(cfg)
+        assert r.config.viewport_w == 800 and r.config.viewport_h == 600
+
+    def test_page_is_none_before_enter(self):
+        from svg_guard.checker import BrowserRunner
+
+        r = BrowserRunner()
+        assert r.page is None
+
+
 class TestCheckDirectoryViaCli:
     """Playwright-driven behaviour, exercised through ``python -m svg_guard``."""
 

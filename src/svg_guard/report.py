@@ -1,8 +1,9 @@
-"""HTML report generator — annotated visual report of SVG overflow issues."""
+"""HTML and JSON report generators for svg-guard overflow results."""
 
 from __future__ import annotations
 
 import html
+import json
 from datetime import datetime
 from pathlib import Path
 
@@ -127,4 +128,36 @@ def generate_report(
     parts.append("</main></body></html>")
 
     write_text_atomic(output_path, "\n".join(parts))
+    return output_path
+
+
+def write_json_report(results: dict[str, CheckResult], output_path: Path | str) -> Path:
+    """Serialize check results to a JSON file (machine-readable, for CI).
+
+    Schema (one entry per file with problems):
+      { "file.svg": [ {issue...}, ... ],     # files with overflow issues
+        "broken.svg": { "error": "..." } }   # files that failed to render
+
+    Clean files are omitted. Writing is atomic (see _io.write_text_atomic).
+    """
+    output_path = Path(output_path)
+    report: dict[str, object] = {}
+    for name, result in results.items():
+        if result.error is not None:
+            # Surface errored files explicitly so CI tooling can see them,
+            # distinct from "no issues".
+            report[name] = {"error": result.error}
+        elif not result.ok:
+            report[name] = [
+                {
+                    "type": i.type,
+                    "text": i.text,
+                    "direction": i.direction,
+                    "svg": i.svg,
+                    "parent": i.parent,
+                    "fix": i.fix,
+                }
+                for i in result.issues
+            ]
+    write_text_atomic(output_path, json.dumps(report, indent=2, ensure_ascii=False))
     return output_path

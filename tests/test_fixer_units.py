@@ -219,6 +219,54 @@ class TestFixCardUnits:
         assert msg is None
         assert new_content == content
 
+    def test_dom_index_distinguishes_same_coords(self):
+        # Two rects with IDENTICAL x/y/width/height/fill can't be told apart
+        # by fingerprint alone. dom_index pinpoints the right one by document
+        # position (matching the checker's querySelectorAll order).
+        attrs = {"x": "10", "y": "10", "width": "150", "height": "40"}
+        content = (
+            "<svg>"
+            '<rect x="10" y="10" width="150" height="40"/>'  # index 0
+            '<rect x="10" y="10" width="150" height="40"/>'  # index 1 (identical)
+            "</svg>"
+        )
+        # Target the SECOND rect (dom_index=1). Without dom_index the fixer
+        # would widen the first one and leave the second untouched.
+        new_content, msg = _fix_card(content, attrs, 30, 0, dom_index=1)
+        assert msg is not None
+        # Exactly one rect widened to 180; and it's the second occurrence.
+        assert new_content.count('width="180"') == 1
+        assert new_content.count('width="150"') == 1
+        # The first rect (untouched) still precedes the widened one.
+        first_150 = new_content.find('width="150"')
+        widened = new_content.find('width="180"')
+        assert 0 <= first_150 < widened
+
+    def test_dom_index_zero_targets_first_rect(self):
+        attrs = {"x": "10", "y": "10", "width": "150", "height": "40"}
+        content = (
+            "<svg>"
+            '<rect x="10" y="10" width="150" height="40"/>'
+            '<rect x="10" y="10" width="150" height="40"/>'
+            "</svg>"
+        )
+        new_content, msg = _fix_card(content, attrs, 30, 0, dom_index=0)
+        assert msg is not None
+        # Now the FIRST rect is the one widened.
+        widened = new_content.find('width="180"')
+        remaining = new_content.find('width="150"')
+        assert 0 <= widened < remaining
+
+    def test_dom_index_skips_when_attrs_drifted(self):
+        # If the file was hand-edited between check and fix, the Nth rect may
+        # no longer carry the expected attrs. Refuse rather than widen wrong.
+        attrs = {"x": "10", "y": "10", "width": "150", "height": "40"}
+        content = '<svg><rect x="999" y="999" width="150" height="40"/></svg>'
+        new_content, msg = _fix_card(content, attrs, 30, 0, dom_index=0)
+        assert msg is not None
+        assert "skipped" in msg
+        assert new_content == content  # untouched
+
 
 # ── Playwright regression tests ────────────────────────────────────────────
 

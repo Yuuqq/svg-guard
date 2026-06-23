@@ -11,12 +11,33 @@ Exit code contract (shared by all subcommands):
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 
 
 def _has_render_errors(results: dict) -> bool:
     """True if any CheckResult carries a render error."""
     return any(getattr(r, "error", None) is not None for r in results.values())
+
+
+def _configure_logging(verbose: bool) -> None:
+    """Attach a handler to the svg_guard logger so the CLI reproduces the
+    progress output that used to come from bare ``print`` calls.
+
+    Library callers don't get this handler, so importing svg_guard is silent
+    by default. Output goes to stdout (matching the old print target) with no
+    level prefix so existing CI log scrapers keep working.
+    """
+    level = logging.DEBUG if verbose else logging.INFO
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    logger = logging.getLogger("svg_guard")
+    logger.setLevel(level)
+    # Replace any prior handler so repeated main() calls in tests don't stack.
+    for h in list(logger.handlers):
+        logger.removeHandler(h)
+    logger.addHandler(handler)
+    logger.propagate = False
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -56,6 +77,8 @@ def main(argv: list[str] | None = None) -> None:
     )
 
     args = parser.parse_args(argv)
+
+    _configure_logging(args.verbose if args.command == "check" else False)
 
     try:
         if args.command == "check":

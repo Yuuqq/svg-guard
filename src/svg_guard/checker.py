@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
-import json
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+# Module logger. The CLI attaches a handler so users see the same progress
+# output as before; library callers get no handler by default and the module
+# is silent (call check_directory without dragging print side-effects along).
+logger = logging.getLogger("svg_guard")
 
 # Detection thresholds. Exposed via DetectionConfig (Python) and injected into
 # the JS probe as a JSON object so they are no longer hard-coded magic numbers
@@ -314,11 +319,62 @@ def check_svg(
     svg_path = Path(svg_path).resolve()
     file_url = svg_path.as_uri()
     page.goto(file_url, wait_until="load")
-    page.wait_for_timeout(200)
+    # Wait for fonts to settle instead of a fixed 200ms sleep. SVGs may pull
+    # webfonts via @font-face; measuring before they load gives wrong widths
+    # (especially CJK). document.fonts.ready is a Promise that resolves once
+    # all fonts in use have loaded (or failed); page.evaluate awaits it.
+    # Wrapped so a missing API (very old Chromium) doesn't break the check.
+    try:
+        page.evaluate(
+            "() => (document.fonts && document.fonts.ready) || Promise.resolve()"
+        )
+    except Exception:
+        pass  # non-fatal: measure with whatever fonts are available
 
     raw: dict[str, Any] = page.evaluate(JS_DETECT, cfg.as_js())
     issues = [Issue.from_raw(r) for r in raw.get("issues", [])]
     return CheckResult(path=svg_path, issues=issues, viewBox=raw.get("viewBox"))
+
+
+class BrowserRunner:
+    """Owns a Playwright browser/page lifecycle, reusable across calls.
+
+    Using this as a context manager (``with BrowserRunner(config) as r:``)
+    lets callers check many directories/files without relaunching Chromium
+    for each one. ``check_directory`` accepts a runner via the ``runner``
+    kwarg; when omitted it creates one internally (backwards compatible).
+
+    Kept as a thin sync wrapper on purpose: a full async rewrite for
+    parallel rendering is a larger, riskier change tracked separately.
+    """
+
+    def __init__(self, config: DetectionConfig | None = None) -> None:
+        self.config = config or DetectionConfig()
+        self._pw = None
+        self._browser = None
+        self.page = None
+
+    def __enter__(self) -> "BrowserRunner":
+        from playwright.sync_api import sync_playwright
+
+        self._pw = sync_playwright().start()
+        self._browser = self._pw.chromium.launch()
+        self.page = self._browser.new_page(
+            viewport={
+                "width": self.config.viewport_w,
+                "height": self.config.viewport_h,
+            }
+        )
+        return self
+
+    def __exit__(self, *exc) -> None:
+        if self._browser is not None:
+            self._browser.close()
+        if self._pw is not None:
+            self._pw.stop()
+        self.page = None
+        self._browser = None
+        self._pw = None
 
 
 def check_directory(
@@ -327,11 +383,15 @@ def check_directory(
     verbose: bool = False,
     json_out: Path | str | None = None,
     config: DetectionConfig | None = None,
+    runner: BrowserRunner | None = None,
 ) -> tuple[dict[str, CheckResult], int]:
-    """Check all SVGs in a directory. Returns (results, total_issues)."""
-    from playwright.sync_api import sync_playwright
+    """Check all SVGs in a directory. Returns (results, total_issues).
 
-    cfg = config or DetectionConfig()
+    Pass ``runner=`` to reuse an already-launched browser across calls
+    (avoids Chromium's ~1s startup per invocation). When omitted, a
+    short-lived runner is created for this call only.
+    """
+    cfg = config or (runner.config if runner else DetectionConfig())
     svg_dir = Path(svg_dir).resolve()
     if not svg_dir.is_dir():
         raise FileNotFoundError(f"Directory not found: {svg_dir}")
@@ -340,25 +400,21 @@ def check_directory(
     if not svg_files:
         raise FileNotFoundError(f"No SVG files found in {svg_dir}")
 
-    print(f"Checking {len(svg_files)} SVG files...")
+    logger.info("Checking %d SVG files...", len(svg_files))
 
     results: dict[str, CheckResult] = {}
     total_issues = 0
     total_errors = 0
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch()
-        page = browser.new_page(
-            viewport={"width": cfg.viewport_w, "height": cfg.viewport_h}
-        )
-
+    def _run(page) -> None:
+        nonlocal total_issues, total_errors
         for svg_path in svg_files:
             try:
                 result = check_svg(page, svg_path, config=cfg)
             except Exception as e:
                 # Record the failure ON the result so callers (CLI, JSON report)
                 # can tell a broken file from a clean one. ok becomes False.
-                print(f"  [ERR] {svg_path.name}: {e}")
+                logger.warning("  [ERR] %s: %s", svg_path.name, e)
                 results[svg_path.name] = CheckResult(
                     path=svg_path, issues=[], viewBox=None, error=str(e)
                 )
@@ -370,56 +426,47 @@ def check_directory(
                 total_issues += len(result.issues)
                 for issue in result.issues:
                     text_preview = issue.text[:40]
-                    print(
-                        f"  [!!] {svg_path.name}: "
-                        f'"{text_preview}" overflows {issue.direction}'
+                    logger.info(
+                        '  [!!] %s: "%s" overflows %s',
+                        svg_path.name,
+                        text_preview,
+                        issue.direction,
                     )
                     if verbose and issue.type == "text_rect":
                         par = issue.parent
-                        print(
-                            f"       rect({par.get('attrs', {}).get('x', '?')},"
-                            f"{par.get('attrs', {}).get('y', '?')} "
-                            f"{par.get('attrs', {}).get('width', '?')}x"
-                            f"{par.get('attrs', {}).get('height', '?')}) "
-                            f"fix: expand +{issue.fix.get('expand_w', 0)}"
-                            f"x+{issue.fix.get('expand_h', 0)}"
+                        logger.info(
+                            "       rect(%s,%s %sx%s) fix: expand +%sx+%s",
+                            par.get("attrs", {}).get("x", "?"),
+                            par.get("attrs", {}).get("y", "?"),
+                            par.get("attrs", {}).get("width", "?"),
+                            par.get("attrs", {}).get("height", "?"),
+                            issue.fix.get("expand_w", 0),
+                            issue.fix.get("expand_h", 0),
                         )
             elif verbose:
-                print(f"  [OK] {svg_path.name}")
+                logger.info("  [OK] %s", svg_path.name)
 
-        browser.close()
+    if runner is not None:
+        _run(runner.page)
+    else:
+        with BrowserRunner(cfg) as r:
+            _run(r.page)
 
     files_with_problems = sum(1 for r in results.values() if not r.ok)
-    print(f"\n{'=' * 60}")
-    print(
-        f"Checked {len(svg_files)} files, found {total_issues} issues "
-        f"in {files_with_problems} files"
-        + (f" ({total_errors} failed to render)" if total_errors else "")
-        + "."
+    logger.info("%s", "=" * 60)
+    logger.info(
+        "Checked %d files, found %d issues in %d files%s.",
+        len(svg_files),
+        total_issues,
+        files_with_problems,
+        f" ({total_errors} failed to render)" if total_errors else "",
     )
 
     if json_out:
-        out_path = Path(json_out)
-        report = {}
-        for name, result in results.items():
-            if result.error is not None:
-                # Surface errored files explicitly so CI tooling can see them.
-                report[name] = {"error": result.error}
-            elif not result.ok:
-                report[name] = [
-                    {
-                        "type": i.type,
-                        "text": i.text,
-                        "direction": i.direction,
-                        "svg": i.svg,
-                        "parent": i.parent,
-                        "fix": i.fix,
-                    }
-                    for i in result.issues
-                ]
-        out_path.write_text(
-            json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
-        )
-        print(f"Report saved to {out_path}")
+        # Delegate to report.py so the JSON schema lives in one place.
+        from .report import write_json_report
+
+        write_json_report(results, json_out)
+        logger.info("Report saved to %s", Path(json_out))
 
     return results, total_issues

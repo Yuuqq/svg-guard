@@ -77,15 +77,11 @@ HTML report (runs the full check, then writes the report).
 
 ```python
 from pathlib import Path
-from playwright.sync_api import sync_playwright
-from svg_guard import check_svg, check_directory, fix_svg
+from svg_guard import BrowserRunner, DetectionConfig, check_svg, fix_svg
 
-# Check a single file
-with sync_playwright() as p:
-    browser = p.chromium.launch()
-    page = browser.new_page(viewport={"width": 1600, "height": 1200})
-
-    result = check_svg(page, Path("diagram.svg"))
+# Check a single file, reusing one browser for many operations
+with BrowserRunner() as runner:
+    result = check_svg(runner.page, Path("diagram.svg"))
     print(f"{'OK' if result.ok else 'ISSUES'}: {len(result.issues)} found")
 
     # Auto-fix
@@ -94,11 +90,25 @@ with sync_playwright() as p:
         for change in changes:
             print(f"  Fixed: {change}")
 
-    browser.close()
-
-# Batch check a directory
-results, total = check_directory("./images", verbose=True, json_out="report.json")
+# Batch check a directory — pass the same runner to skip re-launching Chromium
+from svg_guard import check_directory
+with BrowserRunner() as runner:
+    for d in ("./images", "./icons"):
+        results, total = check_directory(d, runner=runner)
 ```
+
+`BrowserRunner` accepts a `DetectionConfig` to tune thresholds and viewport:
+
+```python
+cfg = DetectionConfig(pad=1.0, viewport_w=2000)  # stricter, wider canvas
+with BrowserRunner(cfg) as runner:
+    ...
+```
+
+**Library use is silent by default.** Progress output goes through Python's
+`logging` (logger name `"svg_guard"`); the CLI attaches a handler so users
+see progress, but `import svg_guard` alone prints nothing. Add a handler if
+you want logs in your own tool.
 
 ## How It Works
 

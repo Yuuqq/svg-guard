@@ -1,17 +1,18 @@
-"""Tests for the HTML report generator.
+"""Tests for the HTML and JSON report generators.
 
 These are pure-Python (no browser): we construct ``CheckResult`` objects by
-hand and assert on the generated HTML string. Covers the previously-untested
-``report.py`` module, including the new error-file rendering and the HTML
-escaping that prevents broken/XSS'd output.
+hand and assert on the generated output. Covers the HTML rendering (incl. the
+error-file rendering and HTML escaping that prevents broken/XSS'd output) and
+the JSON serializer used by ``check --json``.
 """
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from svg_guard.checker import CheckResult, Issue
-from svg_guard.report import generate_report
+from svg_guard.report import generate_report, write_json_report
 
 
 def _issue(text: str = "label overflowing right", direction: str = "right") -> Issue:
@@ -111,3 +112,79 @@ class TestGenerateReport:
         generate_report(results, out)
         body = out.read_text(encoding="utf-8")
         assert "All SVG files passed" not in body
+
+
+class TestWriteJsonReport:
+    def _issue(self) -> Issue:
+        return Issue(
+            type="text_rect",
+            text="hello",
+            direction="right",
+            svg={"x": 0, "y": 0, "w": 10, "h": 10},
+            parent={},
+            fix={"expand_w": 5, "expand_h": 0},
+        )
+
+    def test_writes_valid_json(self, tmp_path: Path):
+        out = tmp_path / "r.json"
+        results = {
+            "a.svg": CheckResult(
+                path=Path("a.svg"), issues=[self._issue()], viewBox=None
+            )
+        }
+        write_json_report(results, out)
+        assert out.exists()
+        report = json.loads(out.read_text(encoding="utf-8"))
+        assert "a.svg" in report
+        assert report["a.svg"][0]["type"] == "text_rect"
+
+    def test_clean_files_omitted(self, tmp_path: Path):
+        out = tmp_path / "r.json"
+        results = {
+            "good.svg": CheckResult(path=Path("good.svg"), issues=[], viewBox=None),
+            "bad.svg": CheckResult(
+                path=Path("bad.svg"), issues=[self._issue()], viewBox=None
+            ),
+        }
+        write_json_report(results, out)
+        report = json.loads(out.read_text(encoding="utf-8"))
+        assert "good.svg" not in report
+        assert "bad.svg" in report
+
+    def test_error_file_serialized_as_error_object(self, tmp_path: Path):
+        # A render error must appear as {"error": "..."}, NOT an empty issue
+        # list (which would look like "clean" to CI tooling).
+        out = tmp_path / "r.json"
+        results = {
+            "broken.svg": CheckResult(
+                path=Path("broken.svg"), issues=[], viewBox=None, error="boom"
+            )
+        }
+        write_json_report(results, out)
+        report = json.loads(out.read_text(encoding="utf-8"))
+        assert report["broken.svg"] == {"error": "boom"}
+
+    def test_cjk_text_round_trips_through_json(self, tmp_path: Path):
+        # ensure_ascii=False must hold so CJK issue text survives a round trip.
+        out = tmp_path / "r.json"
+        results = {
+            "a.svg": CheckResult(
+                path=Path("a.svg"),
+                issues=[
+                    Issue(
+                        type="text_rect",
+                        text="中文标签溢出",
+                        direction="right",
+                        svg={"x": 0, "y": 0, "w": 1, "h": 1},
+                        parent={},
+                        fix={},
+                    )
+                ],
+                viewBox=None,
+            )
+        }
+        write_json_report(results, out)
+        raw = out.read_text(encoding="utf-8")
+        assert "中文标签溢出" in raw  # not \u-escaped
+        report = json.loads(raw)
+        assert report["a.svg"][0]["text"] == "中文标签溢出"
