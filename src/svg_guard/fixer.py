@@ -43,6 +43,33 @@ def fix_svg(
     # Fix viewBox overflow first (changes the canvas, not individual elements).
     # Both rect_viewbox and text_viewbox (orphan text) widen the canvas, so we
     # accumulate their deltas and apply them together to avoid repeated edits.
+
+    # content_misfit (Phase 3): the drawing occupies a tiny off-center slice of
+    # the viewBox. Crop the viewBox to the content bbox BEFORE any other fix —
+    # the crop establishes the new coordinate baseline, and the checker emits
+    # absolute crop coords (not deltas) so this is independent of the
+    # expand_viewbox path below. Only one content_misfit is expected per file;
+    # if several appear, the first wins and the rest are dropped (their crop
+    # coords describe the same pre-crop geometry, so re-applying would be wrong).
+    for issue in issues:
+        if issue.type != "content_misfit":
+            continue
+        crop_x = issue.fix.get("crop_x")
+        crop_y = issue.fix.get("crop_y")
+        crop_w = issue.fix.get("crop_w")
+        crop_h = issue.fix.get("crop_h")
+        if None in (crop_x, crop_y, crop_w, crop_h):
+            changes.append(
+                "content_misfit skipped: missing crop coords in issue"
+            )
+            continue
+        content, change = _crop_viewbox(
+            content, float(crop_x), float(crop_y), float(crop_w), float(crop_h)
+        )
+        if change:
+            changes.append(change)
+        break  # first content_misfit establishes the cropped baseline
+
     vb_dw, vb_dh = 0.0, 0.0
     for issue in issues:
         if issue.type not in ("rect_viewbox", "text_viewbox"):
@@ -265,6 +292,100 @@ def _sync_root_svg_dim(
     new_tag = svg_tag[: m.start()] + f'{attr}="{new_val:.0f}"' + svg_tag[m.end() :]
     new_content = content[: svg_match.start()] + new_tag + content[svg_match.end() :]
     return new_content, "add"
+
+
+def _set_root_svg_dim(
+    content: str, attr: str, value: float
+) -> tuple[str, str]:
+    """Set ``attr`` on the root <svg> to an absolute value (no delta).
+
+    Mirrors :func:`_sync_root_svg_dim` but for crop fixes, which set the
+    viewBox to an absolute rectangle rather than growing it. Returns
+    (new_content, mode) where mode is ``"set"``, ``"inject"``, or ``"skip"``
+    (when the existing attr is non-numeric, e.g. ``width="100%"``).
+
+    Handles both quote styles for the existing value; when injecting, the new
+    attribute is inserted *inside* the root ``<svg>`` open tag (before its
+    closing ``>``), using the SVG's own quote style where discernible.
+    """
+    svg_match = re.search(r"<svg\b[^>]*>", content)
+    if not svg_match:
+        return content, "skip"
+    svg_tag = svg_match.group(0)
+
+    # Match the attr in EITHER quote style.
+    m = re.search(rf'\b{attr}\s*=\s*"([^"]*)"', svg_tag) or re.search(
+        rf"\b{attr}\s*=\s*'([^']*)'", svg_tag
+    )
+    if not m:
+        # Inject inside the tag, just before the closing '>'.
+        injected = f' {attr}="{value:.0f}"'
+        close = svg_tag[-1]  # '>' (or '/>' on a self-closing root — rare)
+        new_tag = svg_tag[:-1] + injected + close
+        new_content = content[: svg_match.start()] + new_tag + content[svg_match.end() :]
+        return new_content, "inject"
+
+    old = _parse_len(m.group(1))
+    if old is None:
+        return content, "skip"  # e.g. width="100%": leave alone, don't invent
+    # Preserve the original quote style on rewrite.
+    quote = '"' if m.group(0)[len(attr) + 1] == '"' else "'"
+    new_val_str = f"{value:.0f}"
+    new_attr = f"{attr}={quote}{new_val_str}{quote}"
+    new_tag = svg_tag[: m.start()] + new_attr + svg_tag[m.end() :]
+    new_content = content[: svg_match.start()] + new_tag + content[svg_match.end() :]
+    return new_content, "set"
+
+
+def _crop_viewbox(
+    content: str, new_x: float, new_y: float, new_w: float, new_h: float
+) -> tuple[str, str | None]:
+    """Rewrite the viewBox to an absolute crop rectangle (content_misfit fix).
+
+    The inverse of :func:`_expand_viewbox`: instead of growing the canvas by a
+    delta, this sets the viewBox to a tight rectangle around the visible
+    content, then syncs the root ``<svg>`` width/height to the new viewBox so
+    the diagram renders at its natural size instead of being scaled into a
+    corner. Handles both quote styles; preserves the original quote style.
+    """
+    new_content = content
+    skipped: list[str] = []
+
+    def replace_vb(quote: str, inner: str) -> str:
+        parts = inner.split()
+        if len(parts) != 4:
+            skipped.append("viewBox (unrecognized format)")
+            return f"viewBox={quote}{inner}{quote}"
+        try:
+            [float(p) for p in parts]  # validate all 4 parse as numbers
+        except ValueError:
+            skipped.append(f"viewBox={quote}{inner}{quote}")
+            return f"viewBox={quote}{inner}{quote}"
+        return (
+            f"viewBox={quote}{new_x:.0f} {new_y:.0f} "
+            f"{new_w:.0f} {new_h:.0f}{quote}"
+        )
+
+    def vb_callback(m: "re.Match[str]") -> str:
+        if m.group(1) is not None:
+            return replace_vb('"', m.group(1))
+        return replace_vb("'", m.group(2))
+
+    new_content = re.sub(
+        r'viewBox\s*=\s*"([^"]*)"|viewBox\s*=\s*\'([^\']*)\'',
+        vb_callback,
+        new_content,
+        count=1,
+    )
+
+    # Sync the root <svg> width/height to the cropped viewBox dims (absolute
+    # set, not a delta) so the canvas shrinks with the content.
+    new_content, w_mode = _set_root_svg_dim(new_content, "width", new_w)
+    new_content, h_mode = _set_root_svg_dim(new_content, "height", new_h)
+
+    if skipped:
+        return new_content, f"viewBox cropped; skipped {', '.join(skipped)}"
+    return new_content, f"viewBox cropped to {new_w:.0f}x{new_h:.0f} ({w_mode}/{h_mode})"
 
 
 def _dim_msg(axis: str, delta: float, mode: str) -> str:

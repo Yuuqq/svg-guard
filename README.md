@@ -7,8 +7,8 @@ When SVG diagrams use hardcoded absolute coordinates — common in technical doc
 ## Features
 
 - **Accurate detection** — uses Chromium via Playwright for real rendering measurements, not heuristic estimates
-- **Two-phase check** — catches both text→rect overflow *and* rect→viewBox overflow
-- **Auto-fix** — widens cards and expands viewBox to resolve overflow automatically
+- **Three-phase check** — catches text→rect overflow, rect→viewBox overflow, *and* "content shrunk into a corner" (a drawing that opens mostly blank because its viewBox dwarfs the actual content)
+- **Auto-fix** — widens cards, expands viewBox to resolve overflow, and crops the viewBox when content is off-center and sparse
 - **HTML report** — generates a self-contained visual report: each problem file shows its **rendered SVG with red-box overlays** marking every overflow region (plus the parent rect), cross-highlighted with the issue list on hover
 - **CI-friendly** — exits with code 1 on issues; supports JSON and HTML output
 - **Backup-safe** — creates `.bak` files before any fix
@@ -115,12 +115,14 @@ you want logs in your own tool.
 1. **Render** — Each SVG is loaded into a headless Chromium page via Playwright
 2. **Measure** — `getBBox()` + `getCTM()` give each element's bounds in the SVG's own user units (viewBox space), correctly accumulating transforms like `rotate` and nested `<svg>`. This is viewport-independent: results don't shift when the browser window is resized.
 3. **Associate** — Each text element is matched to its nearest parent rect by center-point containment
-4. **Detect** — Two phases:
+4. **Detect** — Three phases:
    - **Phase 1**: text extends beyond its parent rect → `text_rect` issue
    - **Phase 2**: rect extends beyond the SVG viewBox → `rect_viewbox` issue
+   - **Phase 3**: visible content occupies a small, off-center slice of the viewBox (the "opens mostly blank, drawing shrunk into a corner" failure mode that Phases 1–2 are blind to) → `content_misfit` issue
 5. **Fix** — For each issue, the SVG source is patched (preserving formatting):
    - ViewBox overflow → increases `viewBox` dimensions (and the root `<svg>` width/height)
    - Card overflow → increases the rect's `width`/`height` attributes
+   - Content misfit → crops the `viewBox` (and root width/height) to a tight box around the visible content
 
 ### Tuning detection
 
@@ -134,9 +136,26 @@ cfg = DetectionConfig(pad=1.0, min_rect_w=20.0, min_rect_h=20.0)
 result = check_svg(page, Path("diagram.svg"), config=cfg)
 ```
 
+Phase 3 (`content_misfit`) has its own knobs. A drawing is flagged only when
+its content covers **less than** `coverage_threshold` of the viewBox area **and**
+is off-center by more than `center_offset_threshold` (both must hold, so a
+legitimately sparse-but-centered layout stays clean). `bg_rect_ratio` lets a
+full-canvas background rect be ignored when measuring content coverage.
+
+```python
+# Catch content that covers <40% of the canvas while off-center; ignore
+# background rects spanning 95%+ of the viewBox.
+cfg = DetectionConfig(
+    coverage_threshold=0.4,
+    center_offset_threshold=0.5,
+    bg_rect_ratio=0.95,
+)
+```
+
 ### Limitations
 
 - **Left/top text overflow is reported but not auto-fixed.** Widening a rect grows it toward the bottom-right, so it can never cover text that starts *before* the rect's left/top edge; auto-fixing would loop forever re-expanding. Such issues are flagged `fixable=false` and the fixer skips them with a clear message — move the text manually.
+- **Content misfit is measured by axis-aligned bounding box.** Phase 3 unions every drawable element's bbox (rect/text/path/circle/…) and compares that against the viewBox. A layout that genuinely *intends* a lot of empty space with a centered focal element won't trigger it (the AND of low-coverage *and* off-center guards that), but a sparse, off-center decorative composition could. Tune `coverage_threshold`/`center_offset_threshold` or set the former to `0` to disable the phase entirely.
 - **Rotated elements** are measured by their axis-aligned bounding box in viewBox space (transforms are correctly accumulated via `getCTM`). Exact rotated-region containment (a rotated rect with text rotated differently) is approximated, not polygon-precise.
 - **CJK fonts in CI**: headless Chromium on a Linux runner has no CJK fonts by default, so Chinese/Japanese text may measure differently than on your machine. Install a CJK font (`fonts-noto-cjk` on Debian/Ubuntu) in CI for consistent results.
 

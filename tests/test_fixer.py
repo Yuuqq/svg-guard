@@ -36,6 +36,27 @@ class TestFixViewbox:
         assert len(result2.issues) < len(result.issues)
 
 
+class TestFixContentMisfit:
+    def test_corner_content_gets_cropped(self, page, tmp_path):
+        # content_corner.svg: a small drawing shrunk into the top-left of a
+        # much larger viewBox. Detection flags content_misfit; fixing crops
+        # the viewBox to the content. End-to-end detect -> fix -> re-check.
+        svg_path = _copy_fixture("content_corner.svg", tmp_path)
+        result = check_svg(page, svg_path)
+        assert not result.ok
+        assert any(i.type == "content_misfit" for i in result.issues)
+
+        changes = fix_svg(svg_path, result.issues, backup=False)
+        assert any("cropped" in c for c in changes)
+
+        # After cropping, re-checking must no longer report content_misfit
+        # (the viewBox now tightly bounds the content).
+        result2 = check_svg(page, svg_path)
+        assert all(i.type != "content_misfit" for i in result2.issues), (
+            f"content_misfit still present after fix: {result2.issues}"
+        )
+
+
 class TestFixCard:
     def test_card_fix_applied(self, page, tmp_path):
         svg_path = _copy_fixture("text_overflow.svg", tmp_path)

@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 300" width="400" height="300">
+  <!-- A small drawing (90x50 card) shrunk into the top-left corner of a
+       400x300 viewBox. No text overflow and no rect->viewBox overflow, so the
+       two original phases report it clean — but the content covers only ~3.7%
+       of the canvas and sits far off-center, so Phase 3 flags content_misfit.
+       This is the "opens mostly blank" failure mode. -->
+  <rect x="10" y="10" width="90" height="50" fill="#e0e7ff" rx="6"/>
+  <text x="20" y="40" font-size="14" fill="#333">hi</text>
+</svg>

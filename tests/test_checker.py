@@ -52,9 +52,14 @@ class TestCheckSvg:
         result = check_svg(page, FIXTURES / "cjk_overflow.svg")
         # Whether it overflows depends on the installed CJK font width, so we
         # assert the safer invariant: detection returns a result without
-        # crashing, and if it found issues they are text_rect type.
+        # crashing, and the CJK text overflow (if flagged) is a text_rect.
+        # content_misfit may also appear — this fixture is a small card in the
+        # corner of a large viewBox, which Phase 3 legitimately flags too.
         if not result.ok:
-            assert all(i.type == "text_rect" for i in result.issues)
+            assert any(i.type == "text_rect" for i in result.issues), (
+                "expected a text_rect overflow for the overflowing CJK label, "
+                f"got: {[(i.type, i.direction) for i in result.issues]}"
+            )
 
     def test_nested_svg_does_not_crash(self, page):
         # Nested <svg> elements (common in Inkscape exports, symbol+use, etc.)
@@ -97,6 +102,31 @@ class TestCheckSvg:
             f"{[(i.type, i.direction) for i in result.issues]}"
         )
 
+    def test_content_misfit_detected(self, page):
+        # A small drawing shrunk into the top-left corner of a much larger
+        # viewBox. The original two phases find no overflow (text fits its
+        # rect, rect fits the viewBox), so only Phase 3's coverage/offset
+        # check catches the "opens mostly blank" failure mode.
+        result = check_svg(page, FIXTURES / "content_corner.svg")
+        assert not result.ok
+        misfits = [i for i in result.issues if i.type == "content_misfit"]
+        assert misfits, "expected a content_misfit issue for corner-shrunk content"
+        fix = misfits[0].fix
+        # The fix carries absolute crop coords so the fixer can tighten the
+        # viewBox around the content.
+        for key in ("crop_x", "crop_y", "crop_w", "crop_h"):
+            assert key in fix, f"content_misfit fix missing {key}"
+
+    def test_centered_sparse_content_not_flagged(self, page):
+        # AND-trigger guarantee: good.svg's content covers only ~37% of the
+        # viewBox (below the coverage threshold) but is centered (offset ≈ 0),
+        # so it must NOT be flagged as content_misfit. This is the false-
+        # positive the literal "OR" spec would have hit.
+        result = check_svg(page, FIXTURES / "good.svg")
+        assert all(i.type != "content_misfit" for i in result.issues), (
+            "centered-but-sparse content must not trigger content_misfit"
+        )
+
 
 class TestDetectionConfig:
     def test_as_js_round_trips_all_thresholds(self):
@@ -108,6 +138,10 @@ class TestDetectionConfig:
             vbox_fix_pad=12.0,
             min_rect_w=10.0,
             min_rect_h=20.0,
+            coverage_threshold=0.4,
+            center_offset_threshold=0.6,
+            bg_rect_ratio=0.85,
+            crop_pad=12.0,
         )
         js = cfg.as_js()
         assert js == {
@@ -118,6 +152,10 @@ class TestDetectionConfig:
             "vboxFixPad": 12.0,
             "minRectW": 10.0,
             "minRectH": 20.0,
+            "coverageThreshold": 0.4,
+            "centerOffsetThreshold": 0.6,
+            "bgRectRatio": 0.85,
+            "cropPad": 12.0,
         }
 
     def test_large_pad_makes_good_svg_report_overflow(self, page):
@@ -137,3 +175,6 @@ class TestDetectionConfig:
         assert (cfg.pad, cfg.edge_pad, cfg.vpad) == (3.0, 4.0, 2.0)
         assert (cfg.min_rect_w, cfg.min_rect_h) == (80.0, 40.0)
         assert (cfg.viewport_w, cfg.viewport_h) == (1600, 1200)
+        # Phase 3 (content_misfit) thresholds.
+        assert (cfg.coverage_threshold, cfg.center_offset_threshold) == (0.5, 0.5)
+        assert (cfg.bg_rect_ratio, cfg.crop_pad) == (0.9, 8.0)

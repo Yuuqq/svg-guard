@@ -216,6 +216,75 @@ JS_DETECT = r"""
     }
   }
 
+  // Phase 3: content coverage / misfit. A drawing that occupies only a tiny
+  // off-center slice of the viewBox (e.g. content shrunk into the top-left
+  // corner — a file that "opens mostly blank") slips through the two phases
+  // above: the cards sit inside the viewBox and the text sits inside its card,
+  // so neither overflow fires. We union every drawable element's bbox into a
+  // single content bbox, then flag when the content is BOTH sparse (low area
+  // coverage) AND off-center — the AND avoids flagging a legitimately sparse
+  // but centered layout (a label in the middle of a big canvas).
+  var drawableSel = 'rect, text, path, circle, ellipse, line, polygon, '
+                  + 'polyline, image, use';
+  var drawable = svg.querySelectorAll(drawableSel);
+  var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  var found = false;
+  for (var d = 0; d < drawable.length; d++) {
+    var db = getUserBox(drawable[d]);
+    if (!db) continue;
+    // Skip near-full-canvas rects: a background fill spanning the viewBox must
+    // not mask genuinely tiny content behind it (it would force coverage ≈ 1).
+    if (drawable[d].tagName.toLowerCase() === 'rect'
+        && db.w >= svgW * cfg.bgRectRatio
+        && db.h >= svgH * cfg.bgRectRatio) {
+      continue;
+    }
+    found = true;
+    if (db.x < minX) minX = db.x;
+    if (db.y < minY) minY = db.y;
+    if (db.x + db.w > maxX) maxX = db.x + db.w;
+    if (db.y + db.h > maxY) maxY = db.y + db.h;
+  }
+
+  if (found) {
+    var cw = maxX - minX, ch = maxY - minY;
+    var coverage = (cw * ch) / (svgW * svgH);
+    var cx = minX + cw / 2, cy = minY + ch / 2;
+    // Normalized distance of the content centroid from the viewBox center: 0
+    // means dead-center, ~1 means flush against an edge.
+    var offset = Math.max(
+      Math.abs(cx - svgW / 2) / (svgW / 2),
+      Math.abs(cy - svgH / 2) / (svgH / 2)
+    );
+
+    if (coverage < cfg.coverageThreshold
+        && offset > cfg.centerOffsetThreshold) {
+      // Crop coords: tighten the viewBox around the content, with a little pad
+      // so the fixer doesn't shave off strokes at the very edge. Named cropPad
+      // (not pad) to avoid clashing with the Phase 1 const of the same name.
+      var cropPad = cfg.cropPad;
+      var cx0 = Math.max(0, Math.round(minX - cropPad));
+      var cy0 = Math.max(0, Math.round(minY - cropPad));
+      var cw0 = Math.min(Math.round(svgW - cx0), Math.round(cw + 2 * cropPad));
+      var ch0 = Math.min(Math.round(svgH - cy0), Math.round(ch + 2 * cropPad));
+      results.push({
+        type: 'content_misfit',
+        text: 'content ' + Math.round(cw) + 'x' + Math.round(ch)
+            + ' in ' + Math.round(svgW) + 'x' + Math.round(svgH) + ' viewBox',
+        direction: 'viewbox+oversized',
+        svg: _r({ x: minX, y: minY, w: cw, h: ch }),
+        parent: { viewBox: svgW + 'x' + svgH },
+        fix: {
+          crop_x: cx0,
+          crop_y: cy0,
+          crop_w: cw0,
+          crop_h: ch0,
+          fixable: true
+        }
+      });
+    }
+  }
+
   // Clip text to a safe number of code units, splitting on surrogate pairs so
   // we never emit a lone half of an emoji into the JSON report.
   function _clip(s) {
@@ -234,7 +303,7 @@ JS_DETECT = r"""
 
 @dataclass
 class Issue:
-    type: str  # 'text_rect' | 'rect_viewbox' | 'text_viewbox'
+    type: str  # 'text_rect' | 'rect_viewbox' | 'text_viewbox' | 'content_misfit'
     text: str
     direction: str  # e.g. 'right+bottom' or 'viewbox+bottom'
     svg: dict  # {x, y, w, h} in SVG coordinate space
@@ -293,6 +362,18 @@ class DetectionConfig:
     # ignored as candidate parent containers.
     min_rect_w: float = 80.0
     min_rect_h: float = 40.0
+    # Phase 3 (content misfit): flag when content occupies less than this
+    # fraction of the viewBox area AND is off-center (see center_offset). The
+    # AND avoids flagging legitimately sparse-but-centered layouts.
+    coverage_threshold: float = 0.5
+    center_offset_threshold: float = 0.5
+    # A rect spanning at least this fraction of the viewBox on BOTH axes is
+    # treated as a background fill and excluded from the content bbox (so a
+    # full-canvas background doesn't mask genuinely tiny content).
+    bg_rect_ratio: float = 0.9
+    # Padding (user units) left around content when computing the crop viewBox
+    # for a content_misfit fix, so strokes at the edge aren't shaved off.
+    crop_pad: float = 8.0
     # Browser viewport for rendering. Large enough that typical viewBoxes are
     # rendered near 1:1, minimising subpixel rounding.
     viewport_w: int = 1600
@@ -308,6 +389,10 @@ class DetectionConfig:
             "vboxFixPad": self.vbox_fix_pad,
             "minRectW": self.min_rect_w,
             "minRectH": self.min_rect_h,
+            "coverageThreshold": self.coverage_threshold,
+            "centerOffsetThreshold": self.center_offset_threshold,
+            "bgRectRatio": self.bg_rect_ratio,
+            "cropPad": self.crop_pad,
         }
 
 

@@ -12,6 +12,7 @@ import pytest
 
 from svg_guard.checker import check_svg, Issue
 from svg_guard.fixer import (
+    _crop_viewbox,
     _expand_viewbox,
     _fix_card,
     _parse_len,
@@ -139,6 +140,55 @@ class TestExpandViewbox:
         out, msg = _expand_viewbox(src, 50, 0)
         assert msg is not None
         assert "skipped" in msg
+
+
+class TestCropViewbox:
+    # content_misfit fix: the viewBox is set to an absolute crop rectangle (the
+    # inverse of _expand_viewbox's delta growth). Mirrors TestExpandViewbox's
+    # pure-Python, no-browser coverage.
+
+    def test_sets_absolute_viewbox_coords(self):
+        # Content lives in the top-left ~60x40 of a 400x300 canvas. Crop to it.
+        src = '<svg viewBox="0 0 400 300" width="400" height="300"><rect/></svg>'
+        out, msg = _crop_viewbox(src, 0, 0, 60, 40)
+        assert msg is not None
+        assert 'viewBox="0 0 60 40"' in out
+        # Root width/height sync to the cropped dims.
+        assert 'width="60"' in out
+        assert 'height="40"' in out
+
+    def test_preserves_single_quote_style(self):
+        src = "<svg viewBox='0 0 400 300' width='400' height='300'><rect/></svg>"
+        out, msg = _crop_viewbox(src, 10, 10, 80, 50)
+        assert msg is not None
+        assert "viewBox='10 10 80 50'" in out
+        assert "width='80'" in out
+
+    def test_injects_width_when_root_has_none(self):
+        # Root svg without width/height: inject from the cropped viewBox so the
+        # canvas shrinks with the content instead of staying at the default size.
+        src = '<svg viewBox="0 0 400 300"><rect/></svg>'
+        out, msg = _crop_viewbox(src, 0, 0, 60, 40)
+        assert msg is not None
+        assert 'viewBox="0 0 60 40"' in out
+        assert 'width="60"' in out
+        assert 'height="40"' in out
+
+    def test_skips_non_numeric_width(self):
+        # width="100%" can't be set to an absolute number without changing
+        # meaning — leave it alone (don't invent a value).
+        src = '<svg viewBox="0 0 400 300" width="100%"><rect/></svg>'
+        out, msg = _crop_viewbox(src, 0, 0, 60, 40)
+        assert msg is not None
+        assert 'viewBox="0 0 60 40"' in out  # viewBox still cropped
+        assert 'width="100%"' in out  # root width untouched
+
+    def test_skips_malformed_viewbox(self):
+        src = '<svg viewBox="0 0 400" width="400"/>'
+        out, msg = _crop_viewbox(src, 0, 0, 60, 40)
+        assert msg is not None
+        assert "skipped" in msg
+        assert 'viewBox="0 0 400"' in out  # untouched
 
 
 class TestSafeBackup:
@@ -375,6 +425,107 @@ class TestOrphanTextRegression:
         modified = svg_path.read_text(encoding="utf-8")
         assert 'viewBox="0 0 300 140"' in modified
         assert 'height="140"' in modified
+
+
+class TestContentMisfitRegression:
+    """content_misfit (Phase 3): crop the viewBox to the content bbox.
+
+    No browser: the Issue is built by hand so the crop path is deterministic
+    regardless of which fonts the host has installed (mirrors the orphan-text
+    deterministic tests above).
+    """
+
+    def test_crop_tightens_viewbox_to_content(self, tmp_path):
+        svg = (
+            '<svg viewBox="0 0 400 300" width="400" height="300">'
+            '<rect x="10" y="10" width="90" height="50" fill="#e0e7ff"/>'
+            '<text x="20" y="40">hi</text>'
+            "</svg>"
+        )
+        svg_path = tmp_path / "corner.svg"
+        svg_path.write_text(svg, encoding="utf-8")
+
+        issue = Issue(
+            type="content_misfit",
+            text="content 90x50 in 400x300 viewBox",
+            direction="viewbox+oversized",
+            svg={"x": 10, "y": 10, "w": 90, "h": 50},
+            parent={"viewBox": "400x300"},
+            fix={
+                "crop_x": 2,
+                "crop_y": 2,
+                "crop_w": 106,
+                "crop_h": 66,
+                "fixable": True,
+            },
+        )
+        changes = fix_svg(svg_path, [issue], backup=False)
+        assert changes, "content_misfit should produce a crop change"
+        modified = svg_path.read_text(encoding="utf-8")
+        # viewBox set to the absolute crop rectangle.
+        assert 'viewBox="2 2 106 66"' in modified
+        # Root width/height synced to the cropped dims.
+        assert 'width="106"' in modified
+        assert 'height="66"' in modified
+
+    def test_missing_crop_coords_reports_skip(self, tmp_path):
+        # A content_misfit issue lacking crop coords must surface a skip
+        # message (not be silently dropped) and leave the file untouched.
+        svg = (
+            '<svg viewBox="0 0 400 300" width="400" height="300">'
+            '<rect x="10" y="10" width="90" height="50"/>'
+            "</svg>"
+        )
+        svg_path = tmp_path / "nocrop.svg"
+        svg_path.write_text(svg, encoding="utf-8")
+
+        issue = Issue(
+            type="content_misfit",
+            text="content in 400x300 viewBox",
+            direction="viewbox+oversized",
+            svg={"x": 10, "y": 10, "w": 90, "h": 50},
+            parent={},
+            fix={"fixable": True},  # no crop_* coords
+        )
+        before = svg_path.read_text(encoding="utf-8")
+        changes = fix_svg(svg_path, [issue], backup=False)
+        assert any("skipped" in c for c in changes)
+        assert svg_path.read_text(encoding="utf-8") == before  # unchanged
+
+    def test_content_misfit_applied_alongside_text_rect(self, tmp_path):
+        # A content_misfit (crop) and a text_rect (widen rect) on the same file
+        # must both be applied in one pass. The crop runs first and establishes
+        # the new viewBox; the rect widen follows independently.
+        svg = (
+            '<svg viewBox="0 0 400 300" width="400" height="300">'
+            '<rect x="10" y="10" width="90" height="50"/>'
+            "</svg>"
+        )
+        svg_path = tmp_path / "both.svg"
+        svg_path.write_text(svg, encoding="utf-8")
+
+        misfit = Issue(
+            type="content_misfit",
+            text="content in 400x300 viewBox",
+            direction="viewbox+oversized",
+            svg={"x": 10, "y": 10, "w": 90, "h": 50},
+            parent={},
+            fix={"crop_x": 2, "crop_y": 2, "crop_w": 106, "crop_h": 66},
+        )
+        text_issue = Issue(
+            type="text_rect",
+            text="x",
+            direction="right",
+            svg={"x": 10, "y": 10, "w": 200, "h": 50},
+            parent={"attrs": {"x": "10", "y": "10", "width": "90", "height": "50"}},
+            fix={"expand_w": 30, "expand_h": 0},
+        )
+        changes = fix_svg(svg_path, [misfit, text_issue], backup=False)
+        assert changes, "both issues should produce changes"
+        modified = svg_path.read_text(encoding="utf-8")
+        # Both fixes landed: cropped viewBox AND widened rect.
+        assert 'viewBox="2 2 106 66"' in modified
+        assert 'width="120"' in modified  # rect 90 -> 120
 
 
 # ── fix_svg integration behaviour (no browser) ────────────────────────────
