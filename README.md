@@ -110,6 +110,29 @@ with BrowserRunner(cfg) as runner:
 see progress, but `import svg_guard` alone prints nothing. Add a handler if
 you want logs in your own tool.
 
+### `DetectionConfig` reference
+
+Every detection threshold lives on `DetectionConfig`. All lengths are in the
+SVG's own **user units** (viewBox space), not CSS pixels — so they don't change
+when the browser window is resized. Construct it with any subset of keyword
+args; omitted fields keep their defaults.
+
+| Field | Default | Phase | Description |
+|-------|---------|-------|-------------|
+| `pad` | `3.0` | 1 | Extra slack (user units) a `<text>` is allowed to extend beyond its parent rect before flagging `text_rect` |
+| `edge_pad` | `4.0` | 1 | Additional slack applied at the rect's right/bottom edge (where text typically clips) |
+| `vpad` | `2.0` | 1 | Vertical slack for the text baseline / descender area |
+| `fix_pad` | `2.0` | 1 | Extra width/height added when widening a rect in a fix, so the text isn't flush against the edge |
+| `min_rect_w` | `80.0` | 1 | Rects narrower than this are ignored as parent containers (decorative dots, dividers) |
+| `min_rect_h` | `40.0` | 1 | Rects shorter than this are ignored as parent containers |
+| `vbox_fix_pad` | `4.0` | 2 | Extra slack added when expanding the viewBox in a `rect_viewbox`/`text_viewbox` fix |
+| `coverage_threshold` | `0.5` | 3 | Flag `content_misfit` when content covers **less than** this fraction of the viewBox area (combined with `center_offset_threshold` via AND) |
+| `center_offset_threshold` | `0.5` | 3 | Flag when the content centroid is farther from the viewBox center than this (normalized: `0` = dead center, `~1` = flush to an edge). Set `coverage_threshold=0` to disable Phase 3 entirely |
+| `bg_rect_ratio` | `0.9` | 3 | A rect spanning at least this fraction of the viewBox on **both** axes is treated as a background fill and excluded from the content bbox (so a full-canvas background doesn't mask genuinely tiny content) |
+| `crop_pad` | `8.0` | 3 | Padding (user units) left around content when computing the crop viewBox for a `content_misfit` fix, so edge strokes aren't shaved off |
+| `viewport_w` | `1600` | render | Browser viewport width for rendering |
+| `viewport_h` | `1200` | render | Browser viewport height for rendering |
+
 ## How It Works
 
 1. **Render** — Each SVG is loaded into a headless Chromium page via Playwright
@@ -162,6 +185,33 @@ cfg = DetectionConfig(
 ## Why Not Heuristics?
 
 SVG text rendering depends on the actual font, kerning, ligatures, and CSS. A 16px Chinese character might render as 14px or 18px depending on the font. The only reliable way to detect overflow is to render and measure — which is exactly what svg-guard does.
+
+## Example: detecting `content_misfit`
+
+Some SVGs open "mostly blank" — the viewBox is far larger than the drawing, which is shrunk into a corner. The original two-phase check misses this: the text fits its rect, and the rect fits the viewBox, so neither overflow fires. **Phase 3** catches it by measuring how much of the canvas the content actually fills *and* whether it's off-center (both must hold, so a deliberately sparse-but-centered layout is left alone).
+
+Take this SVG — a small card with the text "hi", drawn in the top-left corner of a 400×300 canvas:
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 300" width="400" height="300">
+  <rect x="10" y="10" width="90" height="50" fill="#e0e7ff" rx="6"/>
+  <text x="20" y="40" font-size="14" fill="#333">hi</text>
+</svg>
+```
+
+The content covers only **~3.7%** of the viewBox and sits far off-center (offset ≈ 0.78), so `check` flags it:
+
+```
+content_misfit: content 90x50 in 400x300 viewBox  (viewbox+oversized)
+```
+
+`fix` then crops the viewBox to a tight box around the content (viewBox `0 0 400 300` → `2 2 106 66`, with root width/height synced), restoring the drawing to its natural size:
+
+| Before `fix` — content shrunk into the corner | After `fix` — viewBox cropped to the content |
+|:---:|:---:|
+| ![content shrunk into the top-left corner of a mostly-empty canvas](docs/content_misfit_before.png) | ![viewBox cropped tightly around the content, no empty space](docs/content_misfit_after.png) |
+
+The light-gray area in each screenshot is the SVG's own canvas — in the "before" image it makes the wasted space visible. After the fix, the canvas is just big enough to hold the drawing.
 
 ## Development
 
