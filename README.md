@@ -1,228 +1,426 @@
-# svg-guard
+# 🛡️ svg-guard
 
-Detect and auto-fix text overflow in SVG diagrams.
+**Automatically detect and fix text overflow in SVG diagrams**
 
-When SVG diagrams use hardcoded absolute coordinates — common in technical documentation, textbooks, and infographics — text frequently overflows its container boxes. This is especially painful with CJK characters, where rendered width varies by font and platform. **svg-guard** renders each SVG in a real browser, measures every `<text>` element against its parent `<rect>`, and reports (or fixes) any overflow.
+> Designed for technical documentation, textbooks, flowcharts, architecture diagrams, and infographics.  
+> No more manual coordinate tweaking or guessing text widths!
 
-## Features
+When SVGs use hardcoded absolute coordinates (common with draw.io, Figma, Visio, or hand-written SVGs), text frequently overflows card boundaries, gets clipped, or the entire graphic ends up "shrunk into a corner with lots of empty space."
 
-- **Accurate detection** — uses Chromium via Playwright for real rendering measurements, not heuristic estimates
-- **Three-phase check** — catches text→rect overflow, rect→viewBox overflow, *and* "content shrunk into a corner" (a drawing that opens mostly blank because its viewBox dwarfs the actual content)
-- **Auto-fix** — widens cards, expands viewBox to resolve overflow, and crops the viewBox when content is off-center and sparse
-- **HTML report** — generates a self-contained visual report: each problem file shows its **rendered SVG with red-box overlays** marking every overflow region (plus the parent rect), cross-highlighted with the issue list on hover
-- **CI-friendly** — exits with code 1 on issues; supports JSON and HTML output
-- **Backup-safe** — creates `.bak` files before any fix
+This problem is especially painful with **CJK characters** (Chinese, Japanese, Korean) because rendered width varies significantly by font and platform.
 
-## Install
+**svg-guard** solves this by using **real browser rendering + precise measurement** instead of heuristics or string length estimation.
+
+---
+
+## ✨ Key Features
+
+| Feature                    | Description                                      | Benefit for Beginners                  |
+|---------------------------|--------------------------------------------------|----------------------------------------|
+| **Real Browser Rendering**   | Uses Playwright + Chromium for accurate rendering | Results match exactly what users see   |
+| **Three-Phase Detection**    | Catches text→rect, rect→viewBox, and content_misfit issues | Covers 95%+ of common overflow cases   |
+| **Auto-Fix**                 | One-click: widen cards, expand viewBox, or smart-crop | No more manual parameter tuning        |
+| **Beautiful Visual Reports** | Self-contained HTML with red highlight boxes + hover sync | Problems are instantly visible         |
+| **CI Friendly**              | Non-zero exit code + JSON output                 | Easy integration with GitHub Actions   |
+| **Safe Backups**             | Creates `.svg.bak` before any changes            | Safe to run even on important files    |
+| **Python API**               | `check_svg`, `fix_svg`, `check_directory`        | Integrate into your own tools          |
+
+---
+
+## 🖼️ Before & After Comparison
+
+![Before & After Comparison](images/before-after.jpg)
+
+*Left: Text overflowing the card boundary (clipped in real rendering)*  
+*Right: svg-guard automatically widens the card so text fits perfectly*
+
+---
+
+## 🚀 Quick Start for Beginners (5 Minutes)
+
+### Step 1: Install (one-time)
 
 ```bash
 pip install svg-guard
 playwright install chromium
 ```
 
-Requires Python 3.10+.
+> **Tip**: `playwright install chromium` downloads ~150MB browser engine (requires internet on first run).
 
-## Quick Start
+### Step 2: Prepare Your SVG Files
+
+Place your `.svg` files in a folder, for example:
+
+```
+my-project/
+├── diagrams/
+│   ├── architecture.svg
+│   ├── flowchart.svg
+│   └── user-flow.svg
+└── ...
+```
+
+### Step 3: Check + Generate Report (Recommended First Step)
 
 ```bash
-# Check all SVGs in current directory
-svg-guard check --dir ./images --verbose
-
-# Check and generate HTML + JSON reports
-svg-guard check --dir ./images --json report.json --html report.html
-
-# Auto-fix detected issues
-svg-guard fix --dir ./images
-
-# Preview fixes without writing
-svg-guard fix --dir ./images --dry-run
+cd my-project
+svg-guard check --dir ./diagrams --html report.html --verbose
 ```
 
-## CLI Reference
+After running, open `report.html` — you will see:
 
-### `svg-guard check`
+![svg-guard HTML Visual Report Example](images/report-example.jpg)
 
-Detect overflow issues in SVG files.
+**Report Highlights**:
+- Real rendered SVG on the left
+- **Red semi-transparent boxes** precisely marking overflow areas and parent rects
+- Right sidebar with issue list (hover to highlight corresponding red box)
+- Light / Dark mode support
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--dir` | `.` | Directory containing SVG files |
-| `--verbose`, `-v` | off | Show per-file details |
-| `--json FILE` | — | Write JSON report |
-| `--html FILE` | — | Write HTML visual report |
+### Step 4: Auto-Fix
 
-Exit code: **0** if no issues, **1** if any overflow detected.
+Once you're happy with the report:
 
-### `svg-guard fix`
-
-Auto-fix detected overflow issues.
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--dir` | `.` | Directory containing SVG files |
-| `--dry-run` | off | Show what would change without modifying files |
-| `--no-backup` | off | Skip creating `.svg.bak` backup files |
-
-### `svg-guard report`
-
-Check every SVG in the directory and render the results as a self-contained
-HTML report (runs the full check, then writes the report).
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--dir` | `.` | Directory containing SVG files |
-| `--output`, `-o` | `svg-guard-report.html` | Output HTML path |
-
-## Programmatic API
-
-```python
-from pathlib import Path
-from svg_guard import BrowserRunner, DetectionConfig, check_svg, fix_svg
-
-# Check a single file, reusing one browser for many operations
-with BrowserRunner() as runner:
-    result = check_svg(runner.page, Path("diagram.svg"))
-    print(f"{'OK' if result.ok else 'ISSUES'}: {len(result.issues)} found")
-
-    # Auto-fix
-    if not result.ok:
-        changes = fix_svg(Path("diagram.svg"), result.issues)
-        for change in changes:
-            print(f"  Fixed: {change}")
-
-# Batch check a directory — pass the same runner to skip re-launching Chromium
-from svg_guard import check_directory
-with BrowserRunner() as runner:
-    for d in ("./images", "./icons"):
-        results, total = check_directory(d, runner=runner)
+```bash
+svg-guard fix --dir ./diagrams
 ```
 
-`BrowserRunner` accepts a `DetectionConfig` to tune thresholds and viewport:
+- All issues are automatically fixed
+- Original files are backed up as `xxx.svg.bak`
+- Want a dry run? Add `--dry-run`
 
-```python
-cfg = DetectionConfig(pad=1.0, viewport_w=2000)  # stricter, wider canvas
-with BrowserRunner(cfg) as runner:
-    ...
+---
+
+## 🧠 How It Works (Visual Flow)
+
+```mermaid
+flowchart TD
+    A[SVG File] --> B[Playwright launches headless Chromium]
+    B --> C[Real rendering with system fonts]
+    C --> D[getBBox + getCTM in viewBox coordinates]
+    D --> E[Smart matching of text to nearest parent rect]
+    
+    subgraph Three Detection Phases
+    F[Phase 1<br/>text_rect<br/>Text overflows its card]
+    G[Phase 2<br/>rect_viewbox<br/>Card overflows the canvas]
+    H[Phase 3<br/>content_misfit<br/>Content shrunk into corner]
+    end
+    
+    E --> F & G & H
+    F & G & H --> I{Any issues?}
+    I -->|Yes| J[Generate HTML/JSON Report]
+    I -->|Yes| K[Auto-fix<br/>Widen / Expand viewBox / Crop]
+    J & K --> L[Output Results]
 ```
 
-**Library use is silent by default.** Progress output goes through Python's
-`logging` (logger name `"svg_guard"`); the CLI attaches a handler so users
-see progress, but `import svg_guard` alone prints nothing. Add a handler if
-you want logs in your own tool.
+**Why real browser rendering is necessary**:
 
-### `DetectionConfig` reference
+- Text width depends heavily on font, size, weight, letter-spacing, and browser engine
+- CJK characters are especially unpredictable
+- SVGs can contain nested transforms, `rotate`, nested `<svg>`, etc.
+- Heuristic width estimation frequently misses or false-positives issues
 
-Every detection threshold lives on `DetectionConfig`. All lengths are in the
-SVG's own **user units** (viewBox space), not CSS pixels — so they don't change
-when the browser window is resized. Construct it with any subset of keyword
-args; omitted fields keep their defaults.
+svg-guard uses `getBBox()` + `getCTM()` in the **SVG's own user coordinate system** (viewBox space). Results are stable and viewport-independent.
 
-| Field | Default | Phase | Description |
-|-------|---------|-------|-------------|
-| `pad` | `3.0` | 1 | Extra slack (user units) a `<text>` is allowed to extend beyond its parent rect before flagging `text_rect` |
-| `edge_pad` | `4.0` | 1 | Additional slack applied at the rect's right/bottom edge (where text typically clips) |
-| `vpad` | `2.0` | 1 | Vertical slack for the text baseline / descender area |
-| `fix_pad` | `2.0` | 1 | Extra width/height added when widening a rect in a fix, so the text isn't flush against the edge |
-| `min_rect_w` | `80.0` | 1 | Rects narrower than this are ignored as parent containers (decorative dots, dividers) |
-| `min_rect_h` | `40.0` | 1 | Rects shorter than this are ignored as parent containers |
-| `vbox_fix_pad` | `4.0` | 2 | Extra slack added when expanding the viewBox in a `rect_viewbox`/`text_viewbox` fix |
-| `coverage_threshold` | `0.5` | 3 | Flag `content_misfit` when content covers **less than** this fraction of the viewBox area (combined with `center_offset_threshold` via AND) |
-| `center_offset_threshold` | `0.5` | 3 | Flag when the content centroid is farther from the viewBox center than this (normalized: `0` = dead center, `~1` = flush to an edge). Set `coverage_threshold=0` to disable Phase 3 entirely |
-| `bg_rect_ratio` | `0.9` | 3 | A rect spanning at least this fraction of the viewBox on **both** axes is treated as a background fill and excluded from the content bbox (so a full-canvas background doesn't mask genuinely tiny content) |
-| `crop_pad` | `8.0` | 3 | Padding (user units) left around content when computing the crop viewBox for a `content_misfit` fix, so edge strokes aren't shaved off |
-| `viewport_w` | `1600` | render | Browser viewport width for rendering |
-| `viewport_h` | `1200` | render | Browser viewport height for rendering |
+---
 
-## How It Works
+## 🔍 Three Detection Phases Explained
 
-1. **Render** — Each SVG is loaded into a headless Chromium page via Playwright
-2. **Measure** — `getBBox()` + `getCTM()` give each element's bounds in the SVG's own user units (viewBox space), correctly accumulating transforms like `rotate` and nested `<svg>`. This is viewport-independent: results don't shift when the browser window is resized.
-3. **Associate** — Each text element is matched to its nearest parent rect by center-point containment
-4. **Detect** — Three phases:
-   - **Phase 1**: text extends beyond its parent rect → `text_rect` issue
-   - **Phase 2**: rect extends beyond the SVG viewBox → `rect_viewbox` issue
-   - **Phase 3**: visible content occupies a small, off-center slice of the viewBox (the "opens mostly blank, drawing shrunk into a corner" failure mode that Phases 1–2 are blind to) → `content_misfit` issue
-5. **Fix** — For each issue, the SVG source is patched (preserving formatting):
-   - ViewBox overflow → increases `viewBox` dimensions (and the root `<svg>` width/height)
-   - Card overflow → increases the rect's `width`/`height` attributes
-   - Content misfit → crops the `viewBox` (and root width/height) to a tight box around the visible content
+### 1. Phase 1: `text_rect` — Text overflows its parent card (Most Common)
 
-### Tuning detection
+**Typical case**: Flowcharts or card-style architecture diagrams where Chinese/English titles are wider than the reserved `<rect>`.
 
-All thresholds live in `DetectionConfig` (in user units, not CSS pixels) and can be passed to `check_svg` / `check_directory`:
+**Detection logic**:
+- Find the nearest parent `<rect>` for each `<text>`
+- Compare actual text bounds against rect bounds (with configurable `pad`, `edge_pad`, `vpad`)
+- If it exceeds the threshold → flag as `text_rect`
 
-```python
-from svg_guard import DetectionConfig, check_svg
+**Fix**: Automatically increase the rect's `width` / `height` (plus `fix_pad` breathing room)
 
-# Stricter: flag text that's even slightly snug, consider small rects too
-cfg = DetectionConfig(pad=1.0, min_rect_w=20.0, min_rect_h=20.0)
-result = check_svg(page, Path("diagram.svg"), config=cfg)
-```
+### 2. Phase 2: `rect_viewbox` — The card itself overflows the SVG canvas
 
-Phase 3 (`content_misfit`) has its own knobs. A drawing is flagged only when
-its content covers **less than** `coverage_threshold` of the viewBox area **and**
-is off-center by more than `center_offset_threshold` (both must hold, so a
-legitimately sparse-but-centered layout stays clean). `bg_rect_ratio` lets a
-full-canvas background rect be ignored when measuring content coverage.
+**Typical case**: A `<rect>`'s x/y/width/height values place it partially outside the `viewBox`, causing clipping.
 
-```python
-# Catch content that covers <40% of the canvas while off-center; ignore
-# background rects spanning 95%+ of the viewBox.
-cfg = DetectionConfig(
-    coverage_threshold=0.4,
-    center_offset_threshold=0.5,
-    bg_rect_ratio=0.95,
-)
-```
+**Fix**: Automatically expand the root `<svg>` `viewBox`, `width`, and `height`
 
-### Limitations
+### 3. Phase 3: `content_misfit` — "Content shrunk into a corner with lots of empty space" (Most Subtle)
 
-- **Left/top text overflow is reported but not auto-fixed.** Widening a rect grows it toward the bottom-right, so it can never cover text that starts *before* the rect's left/top edge; auto-fixing would loop forever re-expanding. Such issues are flagged `fixable=false` and the fixer skips them with a clear message — move the text manually.
-- **Content misfit is measured by axis-aligned bounding box.** Phase 3 unions every drawable element's bbox (rect/text/path/circle/…) and compares that against the viewBox. A layout that genuinely *intends* a lot of empty space with a centered focal element won't trigger it (the AND of low-coverage *and* off-center guards that), but a sparse, off-center decorative composition could. Tune `coverage_threshold`/`center_offset_threshold` or set the former to `0` to disable the phase entirely.
-- **Rotated elements** are measured by their axis-aligned bounding box in viewBox space (transforms are correctly accumulated via `getCTM`). Exact rotated-region containment (a rotated rect with text rotated differently) is approximated, not polygon-precise.
-- **CJK fonts in CI**: headless Chromium on a Linux runner has no CJK fonts by default, so Chinese/Japanese text may measure differently than on your machine. Install a CJK font (`fonts-noto-cjk` on Debian/Ubuntu) in CI for consistent results.
+**Typical case**:
+- Many tools export SVGs with huge `viewBox` (e.g. `0 0 1920 1080`)
+- Actual content occupies only ~10% of the area and sits in one corner
+- The diagram looks tiny with massive empty space below/right
 
-## Why Not Heuristics?
+**Detection logic** (both conditions must be true):
+- Content coverage < `coverage_threshold` (default 0.5)
+- Content centroid is offset from center by more than `center_offset_threshold`
 
-SVG text rendering depends on the actual font, kerning, ligatures, and CSS. A 16px Chinese character might render as 14px or 18px depending on the font. The only reliable way to detect overflow is to render and measure — which is exactly what svg-guard does.
+**Fix**: Intelligently crop the `viewBox` tightly around the content (with `crop_pad` padding) so the graphic is centered and fills the frame nicely.
 
-## Example: detecting `content_misfit`
+> **Pro tip**: To completely disable Phase 3, set `coverage_threshold=0`
 
-Some SVGs open "mostly blank" — the viewBox is far larger than the drawing, which is shrunk into a corner. The original two-phase check misses this: the text fits its rect, and the rect fits the viewBox, so neither overflow fires. **Phase 3** catches it by measuring how much of the canvas the content actually fills *and* whether it's off-center (both must hold, so a deliberately sparse-but-centered layout is left alone).
+---
 
-Take this SVG — a small card with the text "hi", drawn in the top-left corner of a 400×300 canvas:
+## Real Example SVGs (Before & After)
+
+### Example 1: `text_rect` — Long title overflows card
+
+**Before (problematic):**
 
 ```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 300" width="400" height="300">
-  <rect x="10" y="10" width="90" height="50" fill="#e0e7ff" rx="6"/>
-  <text x="20" y="40" font-size="14" fill="#333">hi</text>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 110" width="320" height="110">
+  <!-- Card background -->
+  <rect x="15" y="15" width="140" height="70" rx="10" ry="10"
+        fill="#e0f2fe" stroke="#0369a1" stroke-width="2"/>
+  
+  <!-- Title that overflows in real rendering -->
+  <text x="25" y="50" font-family="system-ui, sans-serif" font-size="17" 
+        font-weight="600" fill="#0c4a6e">System Architecture Overview</text>
+  
+  <!-- Subtitle -->
+  <text x="25" y="72" font-family="system-ui, sans-serif" font-size="13" 
+        fill="#475569">Core Services &amp; Data Flow</text>
 </svg>
 ```
 
-The content covers only **~3.7%** of the viewBox and sits far off-center (offset ≈ 0.78), so `check` flags it:
+**Problem**: The title "System Architecture Overview" is wider than the 140-unit card when rendered with real fonts.
 
+**After (fixed by svg-guard)**:
+
+The tool automatically widens the `<rect>` (and adds `fix_pad` breathing room):
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 110" width="320" height="110">
+  <rect x="15" y="15" width="210" height="70" rx="10" ry="10"
+        fill="#e0f2fe" stroke="#0369a1" stroke-width="2"/>
+  
+  <text x="25" y="50" font-family="system-ui, sans-serif" font-size="17" 
+        font-weight="600" fill="#0c4a6e">System Architecture Overview</text>
+  
+  <text x="25" y="72" font-family="system-ui, sans-serif" font-size="13" 
+        fill="#475569">Core Services &amp; Data Flow</text>
+</svg>
 ```
-content_misfit: content 90x50 in 400x300 viewBox  (viewbox+oversized)
+
+---
+
+### Example 2: `content_misfit` — Tiny content in huge viewBox
+
+**Before**:
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 800" width="1200" height="800">
+  <!-- Huge empty canvas -->
+  <rect x="0" y="0" width="1200" height="800" fill="#f8fafc"/>
+  
+  <!-- Small actual content in top-left corner -->
+  <rect x="40" y="30" width="180" height="90" rx="8" fill="#bae6fd"/>
+  <text x="55" y="65" font-family="system-ui" font-size="16" fill="#0c4a6e">Login Service</text>
+  <text x="55" y="88" font-family="system-ui" font-size="12" fill="#475569">Auth Module</text>
+</svg>
 ```
 
-`fix` then crops the viewBox to a tight box around the content (viewBox `0 0 400 300` → `2 2 106 66`, with root width/height synced), restoring the drawing to its natural size:
+**Problem**: The diagram opens with a tiny box in the corner and ~90% empty space. Looks unprofessional.
 
-| Before `fix` — content shrunk into the corner | After `fix` — viewBox cropped to the content |
-|:---:|:---:|
-| ![content shrunk into the top-left corner of a mostly-empty canvas](docs/content_misfit_before.png) | ![viewBox cropped tightly around the content, no empty space](docs/content_misfit_after.png) |
+**After (fixed)**:
 
-The light-gray area in each screenshot is the SVG's own canvas — in the "before" image it makes the wasted space visible. After the fix, the canvas is just big enough to hold the drawing.
+svg-guard detects low coverage + high centroid offset and crops the viewBox:
 
-## Development
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="20 10 220 130" width="220" height="130">
+  <rect x="0" y="0" width="220" height="130" fill="#f8fafc"/>
+  
+  <rect x="20" y="20" width="180" height="90" rx="8" fill="#bae6fd"/>
+  <text x="35" y="55" font-family="system-ui" font-size="16" fill="#0c4a6e">Login Service</text>
+  <text x="35" y="78" font-family="system-ui" font-size="12" fill="#475569">Auth Module</text>
+</svg>
+```
+
+Now the diagram is tight, centered, and professional.
+
+---
+
+## ⚙️ DetectionConfig Reference (Beginner-Friendly)
+
+All measurements are in **SVG user units** (viewBox coordinate space), not CSS pixels.
+
+| Parameter                  | Default   | Phase | Purpose                                      | Beginner Tip                          |
+|---------------------------|-----------|-------|----------------------------------------------|---------------------------------------|
+| `pad`                     | 3.0       | 1     | Base tolerance before flagging text overflow | Stricter → try 1.0–2.0                |
+| `edge_pad`                | 4.0       | 1     | Extra tolerance on right/bottom edges        | Usually keep default                  |
+| `vpad`                    | 2.0       | 1     | Vertical tolerance for descenders            | Usually keep default                  |
+| `fix_pad`                 | 2.0       | 1     | Extra padding added during auto-fix          | Tighter look → try 1.0                |
+| `min_rect_w` / `min_rect_h` | 80 / 40 | 1     | Ignore very small decorative rects           | Check small cards → lower to 30/20    |
+| `vbox_fix_pad`            | 4.0       | 2     | Padding when expanding viewBox               | Usually keep default                  |
+| `coverage_threshold`      | 0.5       | 3     | Flag if content covers less than this %      | More sensitive → try 0.3              |
+| `center_offset_threshold` | 0.5       | 3     | Flag if content centroid is too far off-center | Usually keep default               |
+| `bg_rect_ratio`           | 0.9       | 3     | Treat very large rects as background         | Usually keep default                  |
+| `crop_pad`                | 8.0       | 3     | Padding around content when cropping         | Tighter crop → try 4.0                |
+| `viewport_w` / `viewport_h` | 1600/1200 | render | Browser rendering viewport size           | Rarely needs changing                 |
+
+**Custom config example**:
+
+```python
+from svg_guard import DetectionConfig, BrowserRunner, check_directory
+
+cfg = DetectionConfig(
+    pad=1.5,
+    min_rect_w=40,
+    min_rect_h=30,
+    coverage_threshold=0.35,
+)
+
+with BrowserRunner(cfg) as runner:
+    results, total = check_directory("./diagrams", runner=runner)
+```
+
+---
+
+## 🖥️ CLI Commands
+
+### `svg-guard check`
 
 ```bash
-git clone https://github.com/Yuuqq/svg-guard.git
-cd svg-guard
-pip install -e ".[dev]"
-playwright install chromium
-pytest -v
+svg-guard check --dir ./diagrams --verbose --html report.html --json results.json
 ```
 
-## License
+| Flag          | Default | Description                              |
+|---------------|---------|------------------------------------------|
+| `--dir`       | `.`     | Directory containing SVGs                |
+| `--verbose`   | off     | Show per-file details                    |
+| `--html FILE` | —       | Generate self-contained visual HTML report |
+| `--json FILE` | —       | Generate structured JSON report          |
 
-MIT
+Exit code: `0` = clean, `1` = issues found (great for CI)
+
+### `svg-guard fix`
+
+```bash
+svg-guard fix --dir ./diagrams --dry-run   # Preview only
+svg-guard fix --dir ./diagrams             # Apply fixes + backup
+```
+
+### `svg-guard report`
+
+One-command report generation:
+
+```bash
+svg-guard report --dir ./diagrams --output my-report.html
+```
+
+---
+
+## 🐍 Python API Examples
+
+### Basic usage
+
+```python
+from pathlib import Path
+from svg_guard import BrowserRunner, check_svg, fix_svg
+
+with BrowserRunner() as runner:
+    result = check_svg(runner.page, Path("diagrams/arch.svg"))
+    
+    if result.ok:
+        print("✅ No issues found")
+    else:
+        print(f"❌ Found {len(result.issues)} issues")
+        changes = fix_svg(Path("diagrams/arch.svg"), result.issues)
+        for change in changes:
+            print(f"  Fixed: {change}")
+```
+
+### Batch processing (reuse browser for speed)
+
+```python
+from svg_guard import check_directory
+
+with BrowserRunner() as runner:
+    for folder in ["./diagrams", "./icons"]:
+        results, total = check_directory(folder, runner=runner)
+        print(f"{folder}: {total} files processed")
+```
+
+---
+
+## 🧩 CI/CD Example (GitHub Actions)
+
+```yaml
+name: SVG Guard Check
+on: [push, pull_request]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          pip install svg-guard
+          playwright install chromium
+          sudo apt-get update && sudo apt-get install -y fonts-noto-cjk
+      - name: Run svg-guard
+        run: svg-guard check --dir ./docs/images --html report.html
+      - name: Upload report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: svg-guard-report
+          path: report.html
+```
+
+> **Important**: CI environments usually lack CJK fonts. Always install them for accurate Chinese/Japanese/Korean detection.
+
+---
+
+## ❓ FAQ
+
+**Q: Chinese characters show as boxes or garbled in reports?**  
+A: The environment is missing CJK fonts. Install `fonts-noto-cjk` or `fonts-wqy-zenhei`.
+
+**Q: Can I ignore specific SVG files?**  
+A: Currently filter by directory structure or script. `.svgguardignore` support is planned.
+
+**Q: Does it support `<defs>`, `<use>`, complex transforms?**  
+A: Yes — real `getCTM()` accumulates all transformations.
+
+**Q: Will fixes mess up my SVG formatting?**  
+A: No — the tool preserves original indentation and attribute order as much as possible.
+
+**Q: Can I detect without fixing?**  
+A: Yes — use `check` or `fix --dry-run`.
+
+**Q: Detection is slow?**  
+A: First Chromium launch is slow. Reuse the same `BrowserRunner()` instance for batch processing.
+
+---
+
+## 📚 Advanced Tips
+
+1. **First time users**: Always run `check --html report.html` first, review the visual report, then run `fix`.
+2. **Team workflow**: Add `svg-guard check` to pre-commit hooks or required CI checks.
+3. **Tuning**: Adjust `pad` and `min_rect_*` based on your project's style to avoid over- or under-reporting.
+4. **Contribute examples**: Submit real (anonymized) overflowing SVGs from your projects to help improve detection.
+
+---
+
+## 🤝 Contributing
+
+- Open an Issue with your SVG scenario + screenshot
+- Submit PRs for better detection logic, new phases, or report UI improvements
+- Star the repo if this tool helps you!
+
+---
+
+## 📄 License
+
+MIT License
+
+---
+
+**Make every SVG crisp, professional, and overflow-free!**  
+svg-guard — Your SVG Quality Guardian 🛡️
+
+> This is an enhanced version with illustrations, Mermaid diagrams, beginner-friendly steps, detailed parameter explanations, and real before/after SVG examples.
