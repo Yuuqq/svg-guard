@@ -6,7 +6,7 @@ import base64
 import html
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .checker import CheckResult, Issue
@@ -24,39 +24,68 @@ _VIEWBOX_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Human labels + CSS classes for issue types/directions. Centralising these
+# means adding a new issue type can't silently produce an unstyled column.
+_TYPE_LABEL: dict[str, str] = {
+    "text_rect": "text→rect",
+    "rect_viewbox": "rect→viewBox",
+    "text_viewbox": "text→viewBox",
+    "content_misfit": "misfit",
+}
+
 _CSS = """
 * { margin: 0; padding: 0; box-sizing: border-box; }
-body { font-family: -apple-system, "Segoe UI", Roboto, "Noto Sans SC", sans-serif;
-       background: #f8fafc; color: #1e293b; padding: 24px; }
-header { max-width: 900px; margin: 0 auto 32px; }
+:root { color-scheme: light dark; }
+body { font-family: system-ui, -apple-system, "Segoe UI", Roboto,
+       "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
+       "Noto Sans SC", "Source Han Sans SC", sans-serif;
+       background: #f8fafc; color: #1e293b; padding: 24px; line-height: 1.6; }
+header { max-width: 960px; margin: 0 auto 32px; }
 h1 { font-size: 28px; font-weight: 800; margin-bottom: 8px; }
-.meta { color: #64748b; font-size: 15px; }
+.meta { color: #475569; font-size: 15px; }
 .stats { display: flex; gap: 16px; margin-top: 16px; }
 .stat { background: #fff; border: 1px solid #e2e8f0; border-radius: 12px;
         padding: 16px 24px; text-align: center; min-width: 120px; }
-.stat-val { font-size: 28px; font-weight: 800; }
-.stat-label { font-size: 13px; color: #64748b; margin-top: 4px; }
-.stat-val.ok { color: #16a34a; }
-.stat-val.bad { color: #dc2626; }
-main { max-width: 900px; margin: 0 auto; }
+.stat-val { font-size: 28px; font-weight: 800; line-height: 1.2; }
+.stat-label { font-size: 13px; color: #475569; margin-top: 4px; }
+.stat-val.ok { color: #15803d; }
+.stat-val.bad { color: #b91c1c; }
+main { max-width: 960px; margin: 0 auto; }
 .file-card { background: #fff; border: 1px solid #e2e8f0; border-radius: 16px;
              padding: 24px; margin-bottom: 16px; }
 .file-name { font-size: 18px; font-weight: 700; margin-bottom: 4px;
-             font-family: "SF Mono", "Cascadia Code", monospace; }
-.file-issues { color: #dc2626; font-size: 14px; margin-bottom: 16px; }
-.issue-row { display: grid; grid-template-columns: 28px 80px 100px 1fr;
+             font-family: "SF Mono", "Cascadia Code", "Consolas",
+             "PingFang SC", "Microsoft YaHei", monospace;
+             overflow-wrap: anywhere; min-width: 0; word-break: break-word; }
+.file-issues { color: #b91c1c; font-size: 14px; margin-bottom: 16px; }
+.banner { border-radius: 8px; padding: 12px 16px; margin-bottom: 16px;
+          font-size: 14px; font-weight: 600; }
+.banner.alert { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
+.banner.ok { background: #f0fdf4; color: #166534; border: 1px solid #bbf7d0; }
+.issues { list-style: none; }
+.issue-row { display: grid;
+             grid-template-columns: 28px minmax(92px, auto) minmax(110px, auto)
+                                    minmax(96px, auto) minmax(96px, auto) 1fr;
              gap: 12px; padding: 10px 0; border-top: 1px solid #f1f5f9;
-             font-size: 14px; align-items: baseline; cursor: default; }
+             font-size: 14px; line-height: 1.5; align-items: start; cursor: default; }
+.issue-row > span { min-width: 0; }
 .issue-row.highlighted { background: #fef2f2; }
-.issue-idx { font-weight: 700; color: #dc2626; text-align: center; }
-.issue-type { font-weight: 700; color: #6366f1; }
+.issue-row:focus-visible { outline: 2px solid #4338ca; outline-offset: 2px;
+                           border-radius: 4px; }
+.issue-idx { font-weight: 700; color: #b91c1c; text-align: center; }
+.issue-type { font-weight: 700; color: #4338ca; }
 .issue-dir { font-weight: 600; }
-.issue-dir.text-overflow { color: #dc2626; }
-.issue-dir.viewbox-overflow { color: #d97706; }
-.issue-text { color: #475569; word-break: break-all; }
-.badge { display: inline-block; background: #fef2f2; color: #dc2626;
+.issue-dir.text-overflow { color: #b91c1c; }
+.issue-dir.viewbox-overflow { color: #b45309; }
+.issue-coords { font-family: "SF Mono", "Cascadia Code", "Consolas", monospace;
+                color: #475569; overflow-wrap: anywhere; font-size: 13px; }
+.issue-fix { font-family: "SF Mono", "Cascadia Code", "Consolas", monospace;
+             color: #15803d; overflow-wrap: anywhere; font-size: 13px; }
+.issue-fix.unfixable { color: #b45309; }
+.issue-text { color: #334155; overflow-wrap: anywhere; word-break: break-word; }
+.badge { display: inline-block; background: #fee2e2; color: #991b1b;
          border-radius: 6px; padding: 2px 8px; font-size: 13px; font-weight: 700; }
-.empty { text-align: center; color: #16a34a; font-size: 18px;
+.empty { text-align: center; color: #15803d; font-size: 18px;
          font-weight: 700; padding: 48px 0; }
 
 /* Visual preview: original SVG image with a red-box overlay. */
@@ -64,6 +93,7 @@ main { max-width: 900px; margin: 0 auto; }
            border-radius: 8px; overflow: hidden; background:
            repeating-conic-gradient(#f1f5f9 0% 25%, #fff 0% 50%) 50% / 20px 20px; }
 .preview svg.preview-img { display: block; width: 100%; height: auto; }
+.preview img.preview-img { display: block; width: 100%; height: auto; }
 .preview .overlay { position: absolute; inset: 0; width: 100%; height: 100%;
                     pointer-events: none; }
 .overlay rect.box { fill: rgba(220, 38, 38, 0.12); stroke: #dc2626;
@@ -72,19 +102,52 @@ main { max-width: 900px; margin: 0 auto; }
 .overlay rect.parent { fill: rgba(99, 102, 241, 0.06); stroke: #6366f1;
                         stroke-width: 1.5; stroke-dasharray: 4 3;
                         vector-effect: non-scaling-stroke; }
-.overlay .num { fill: #fff; stroke: #dc2626; stroke-width: 2;
-                paint-order: stroke; font: bold 11px sans-serif; }
-.preview-note { font-size: 12px; color: #94a3b8; margin-top: 6px; }
+/* Number badge: red fill with a thick white outline so the digit reads on any
+   background (paint-order draws the stroke under the fill). */
+.overlay .num { fill: #dc2626; stroke: #fff; stroke-width: 3;
+                paint-order: stroke; font: bold 12px sans-serif; }
+.preview-note { font-size: 12px; color: #475569; margin-top: 6px; }
 .preview .legend { display: inline-flex; gap: 12px; font-size: 11px;
-                   color: #64748b; padding: 6px 10px; }
+                   color: #475569; padding: 6px 10px; }
 .legend .sw { display: inline-block; width: 10px; height: 10px;
               vertical-align: middle; margin-right: 4px; border-radius: 2px; }
 .legend .sw.over { background: rgba(220,38,38,0.4); border: 1px solid #dc2626; }
 .legend .sw.par { background: rgba(99,102,241,0.15); border: 1px dashed #6366f1; }
+
+@media (max-width: 640px) {
+  body { padding: 12px; }
+  .stats { flex-wrap: wrap; }
+  .stat { flex: 1 1 calc(50% - 8px); min-width: 0; }
+  /* Stack the issue grid vertically on narrow screens. */
+  .issue-row { grid-template-columns: 1fr; gap: 4px; }
+}
+
+@media (prefers-color-scheme: dark) {
+  body { background: #0f172a; color: #e2e8f0; }
+  .stat, .file-card { background: #1e293b; border-color: #334155; }
+  .file-name { color: #f1f5f9; }
+  .stat-label, .meta, .preview-note, .legend { color: #94a3b8; }
+  .issue-row { border-top-color: #334155; }
+  .issue-row.highlighted { background: rgba(220,38,38,0.16); }
+  .issue-coords { color: #cbd5e1; }
+  .issue-text { color: #cbd5e1; }
+  .preview { background: repeating-conic-gradient(#1e293b 0% 25%, #0f172a 0% 50%) 50% / 20px 20px;
+             border-color: #334155; }
+  .banner.alert { background: rgba(220,38,38,0.18); color: #fca5a5; border-color: #7f1d1d; }
+  .banner.ok { background: rgba(34,197,94,0.16); color: #86efac; border-color: #14532d; }
+}
+
+@media print {
+  body { background: #fff; color: #000; padding: 0; }
+  header, main { max-width: none; }
+  .stat, .file-card, .preview { box-shadow: none; }
+  .issue-row:focus-visible { outline: none; }
+  * { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+}
 """
 
-# Small script that links an issue row to its overlay box: hovering either
-# end highlights the other. Kept tiny and dependency-free.
+# Small script that links an issue row to its overlay box: hovering OR focusing
+# either end highlights the other. Kept tiny and dependency-free.
 _JS = """
 <script>
 (function () {
@@ -96,6 +159,8 @@ _JS = """
     function off() { row.classList.remove('highlighted'); box.classList.remove('active'); }
     row.addEventListener('mouseenter', on);
     row.addEventListener('mouseleave', off);
+    row.addEventListener('focus', on);
+    row.addEventListener('blur', off);
   });
 })();
 </script>
@@ -142,6 +207,79 @@ def _parent_box(issue: Issue) -> tuple[float, float, float, float] | None:
         return None
 
 
+def _coords(issue: Issue) -> str:
+    """Render the measured box as a compact "(x,y WxH)" string, or ''."""
+    svg = issue.svg or {}
+    try:
+        x, y, w, h = (
+            int(float(svg["x"])),
+            int(float(svg["y"])),
+            int(float(svg["w"])),
+            int(float(svg["h"])),
+        )
+    except (KeyError, TypeError, ValueError):
+        return ""
+    return f"({x},{y} {w}×{h})"
+
+
+def _fmt_fix(fix: dict) -> tuple[str, bool]:
+    """Human description of the proposed fix and whether it is auto-fixable.
+
+    Returns (label, fixable). Recognises every fix shape the checker emits:
+    text_rect (expand_w/expand_h + fixable), *_viewbox (expand_viewbox_*),
+    and content_misfit (crop_*).
+    """
+    if not isinstance(fix, dict) or not fix:
+        return "", True
+
+    # Explicit fixable=False (left/top overflow the fixer must skip).
+    if fix.get("fixable") is False:
+        return "not auto-fixable (move element)", False
+
+    # content_misfit crop.
+    if "crop_w" in fix or "crop_h" in fix:
+        try:
+            cx, cy = int(fix.get("crop_x", 0)), int(fix.get("crop_y", 0))
+            cw, ch = int(fix.get("crop_w", 0)), int(fix.get("crop_h", 0))
+            return f"crop viewBox {cx},{cy} {cw}×{ch}", True
+        except (TypeError, ValueError):
+            return "", True
+
+    # viewBox expansion (rect_viewbox / text_viewbox).
+    dw = fix.get("expand_viewbox_w", 0)
+    dh = fix.get("expand_viewbox_h", 0)
+    if dw or dh:
+        try:
+            return f"expand viewBox +{int(dw)}w +{int(dh)}h", True
+        except (TypeError, ValueError):
+            return "", True
+
+    # text_rect card expansion.
+    ew = fix.get("expand_w", 0)
+    eh = fix.get("expand_h", 0)
+    if ew or eh:
+        try:
+            return f"expand rect +{int(ew)}w +{int(eh)}h", True
+        except (TypeError, ValueError):
+            return "", True
+
+    return "", True
+
+
+def _dir_class(direction: str) -> str:
+    """CSS class for a direction string ('viewbox+...' → viewbox-overflow)."""
+    return "viewbox-overflow" if "viewbox" in (direction or "") else "text-overflow"
+
+
+def _stat(value: int, label: str, kind: str) -> str:
+    """One stat card. ``kind`` ∈ {'ok','bad',''} controls the value color."""
+    cls = f" {kind}" if kind else ""
+    return (
+        f'<div class="stat"><div class="stat-val{cls}">{value}</div>'
+        f'<div class="stat-label">{html.escape(label)}</div></div>'
+    )
+
+
 def _render_preview(result: CheckResult) -> str:
     """Build the preview HTML for one file: original SVG + red-box overlay.
 
@@ -164,6 +302,7 @@ def _render_preview(result: CheckResult) -> str:
         b64 = base64.b64encode(src.encode("utf-8")).decode("ascii")
         img_tag = (
             f'<img class="preview-img" alt="{html.escape(result.path.name)}" '
+            f'loading="lazy" '
             f'src="data:image/svg+xml;base64,{b64}">'
         )
 
@@ -242,41 +381,54 @@ def generate_report(
     files_with_errors = sum(1 for r in results.values() if r.error is not None)
     total_issues = sum(len(r.issues) for r in results.values())
 
+    when = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     parts = [
         "<!DOCTYPE html>",
-        "<html lang='en'><head><meta charset='UTF-8'>",
-        "<meta name='viewport' content='width=device-width, initial-scale=1.0'>",
+        '<html lang="und"><head><meta charset="UTF-8">',
+        '<meta name="viewport" content="width=device-width, initial-scale=1.0">',
+        '<meta name="color-scheme" content="light dark">',
         f"<title>SVG Guard Report — {total_files} files</title>",
         f"<style>{_CSS}</style>",
         _JS,
         "</head><body>",
         "<header>",
         "<h1>SVG Guard Report</h1>",
-        f'<p class="meta">{datetime.now().strftime("%Y-%m-%d %H:%M")} — '
-        f"{total_files} files checked</p>",
+        f'<p class="meta">{when} — {total_files} files checked</p>',
         '<div class="stats">',
-        f'<div class="stat"><div class="stat-val">{total_files}</div>'
-        f'<div class="stat-label">Files</div></div>',
-        f'<div class="stat"><div class="stat-val {"ok" if files_with_issues == 0 else "bad"}">'
-        f'{files_with_issues}</div><div class="stat-label">With Issues</div></div>',
-        f'<div class="stat"><div class="stat-val {"ok" if files_with_errors == 0 else "bad"}">'
-        f'{files_with_errors}</div><div class="stat-label">Errors</div></div>',
-        f'<div class="stat"><div class="stat-val {"ok" if total_issues == 0 else "bad"}">'
-        f'{total_issues}</div><div class="stat-label">Issues</div></div>',
+        _stat(total_files, "Files", ""),
+        _stat(
+            files_with_issues, "With Issues", "ok" if files_with_issues == 0 else "bad"
+        ),
+        _stat(files_with_errors, "Errors", "ok" if files_with_errors == 0 else "bad"),
+        _stat(total_issues, "Issues", "ok" if total_issues == 0 else "bad"),
         "</div></header>",
         "<main>",
     ]
 
+    # Top-level status banner: surfaces render errors loudly (previously a
+    # file that failed to render was invisible unless you read each card).
+    if files_with_errors > 0:
+        parts.append(
+            f'<div class="banner alert" role="alert">'
+            f"{files_with_errors} file(s) failed to render — see below."
+            "</div>"
+        )
+
     if total_issues == 0 and files_with_errors == 0:
         parts.append(
-            '<p class="empty">All SVG files passed — no overflow issues found.</p>'
+            '<p class="empty" role="status">'
+            "All SVG files passed — no overflow issues found."
+            "</p>"
         )
     else:
         for name, result in results.items():
             if result.ok:
                 continue
             parts.append('<div class="file-card">')
-            parts.append(f'<div class="file-name">{html.escape(name)}</div>')
+            parts.append(
+                f'<div class="file-name" title="{html.escape(name)}">'
+                f"{html.escape(name)}</div>"
+            )
             if result.error is not None:
                 # Render error: show what went wrong instead of fake "0 issues".
                 parts.append(
@@ -284,34 +436,47 @@ def generate_report(
                     '<span class="badge">render error</span></div>'
                 )
                 parts.append(
-                    f'<div class="issue-row">'
+                    f'<ul class="issues"><li class="issue-row">'
                     f'<span class="issue-idx"></span>'
                     f'<span class="issue-type">error</span>'
                     f'<span class="issue-dir viewbox-overflow">render failed</span>'
+                    f'<span class="issue-coords"></span>'
+                    f'<span class="issue-fix"></span>'
                     f'<span class="issue-text">{html.escape(result.error)}</span>'
-                    f"</div>"
+                    f"</li></ul>"
                 )
             else:
                 parts.append(
-                    f'<div class="file-issues">'
+                    '<div class="file-issues">'
                     f'<span class="badge">{len(result.issues)} issues</span></div>'
                 )
                 # Visual preview (original SVG + red-box overlay), if drawable.
                 parts.append(_render_preview(result))
+                parts.append('<ul class="issues">')
                 for idx, issue in enumerate(result.issues, start=1):
-                    dir_class = (
-                        "text-overflow"
-                        if "viewbox" not in issue.direction
-                        else "viewbox-overflow"
-                    )
+                    dir_class = _dir_class(issue.direction)
+                    coords = _coords(issue)
+                    fix_label, fixable = _fmt_fix(issue.fix)
+                    type_label = _TYPE_LABEL.get(issue.type, issue.type)
+                    # NOTE: keep "class=\"issue-row\" data-idx=\"N\"" as a
+                    # contiguous substring — tests and the hover script key on it.
+                    fix_cls = "" if fixable else " unfixable"
                     parts.append(
-                        f'<div class="issue-row" data-idx="{idx}">'
+                        f'<li class="issue-row" data-idx="{idx}" '
+                        f'data-type="{html.escape(issue.type)}" tabindex="0" '
+                        f'role="button" '
+                        f'aria-label="Issue {idx}: {html.escape(type_label)} '
+                        f'{html.escape(issue.direction)}">'
                         f'<span class="issue-idx">{idx}</span>'
-                        f'<span class="issue-type">{html.escape(issue.type)}</span>'
-                        f'<span class="issue-dir {dir_class}">{html.escape(issue.direction)}</span>'
+                        f'<span class="issue-type">{html.escape(type_label)}</span>'
+                        f'<span class="issue-dir {dir_class}">'
+                        f"{html.escape(issue.direction)}</span>"
+                        f'<span class="issue-coords">{html.escape(coords)}</span>'
+                        f'<span class="issue-fix{fix_cls}">{html.escape(fix_label)}</span>'
                         f'<span class="issue-text">{html.escape(issue.text)}</span>'
-                        f"</div>"
+                        f"</li>"
                     )
+                parts.append("</ul>")
             parts.append("</div>")
 
     parts.append("</main></body></html>")
