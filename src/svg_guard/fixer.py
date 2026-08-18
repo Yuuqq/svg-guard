@@ -59,9 +59,7 @@ def fix_svg(
         crop_w = issue.fix.get("crop_w")
         crop_h = issue.fix.get("crop_h")
         if None in (crop_x, crop_y, crop_w, crop_h):
-            changes.append(
-                "content_misfit skipped: missing crop coords in issue"
-            )
+            changes.append("content_misfit skipped: missing crop coords in issue")
             continue
         content, change = _crop_viewbox(
             content, float(crop_x), float(crop_y), float(crop_w), float(crop_h)
@@ -294,9 +292,7 @@ def _sync_root_svg_dim(
     return new_content, "add"
 
 
-def _set_root_svg_dim(
-    content: str, attr: str, value: float
-) -> tuple[str, str]:
+def _set_root_svg_dim(content: str, attr: str, value: float) -> tuple[str, str]:
     """Set ``attr`` on the root <svg> to an absolute value (no delta).
 
     Mirrors :func:`_sync_root_svg_dim` but for crop fixes, which set the
@@ -322,7 +318,9 @@ def _set_root_svg_dim(
         injected = f' {attr}="{value:.0f}"'
         close = svg_tag[-1]  # '>' (or '/>' on a self-closing root — rare)
         new_tag = svg_tag[:-1] + injected + close
-        new_content = content[: svg_match.start()] + new_tag + content[svg_match.end() :]
+        new_content = (
+            content[: svg_match.start()] + new_tag + content[svg_match.end() :]
+        )
         return new_content, "inject"
 
     old = _parse_len(m.group(1))
@@ -361,10 +359,7 @@ def _crop_viewbox(
         except ValueError:
             skipped.append(f"viewBox={quote}{inner}{quote}")
             return f"viewBox={quote}{inner}{quote}"
-        return (
-            f"viewBox={quote}{new_x:.0f} {new_y:.0f} "
-            f"{new_w:.0f} {new_h:.0f}{quote}"
-        )
+        return f"viewBox={quote}{new_x:.0f} {new_y:.0f} {new_w:.0f} {new_h:.0f}{quote}"
 
     def vb_callback(m: "re.Match[str]") -> str:
         if m.group(1) is not None:
@@ -385,7 +380,10 @@ def _crop_viewbox(
 
     if skipped:
         return new_content, f"viewBox cropped; skipped {', '.join(skipped)}"
-    return new_content, f"viewBox cropped to {new_w:.0f}x{new_h:.0f} ({w_mode}/{h_mode})"
+    return (
+        new_content,
+        f"viewBox cropped to {new_w:.0f}x{new_h:.0f} ({w_mode}/{h_mode})",
+    )
 
 
 def _dim_msg(axis: str, delta: float, mode: str) -> str:
