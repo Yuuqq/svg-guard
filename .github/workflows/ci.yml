@@ -40,6 +40,6 @@ jobs:
         with:
           python-version: "3.12"
       - run: |
-          pip install ruff
+          pip install 'ruff==0.14.13'
           ruff check src/ tests/
           ruff format --check src/ tests/
