@@ -137,6 +137,8 @@ svg-guard uses `getBBox()` + `getCTM()` in the **SVG's own user coordinate syste
 
 **Fix**: Automatically increase the rect's `width` / `height` (plus `fix_pad` breathing room)
 
+> **Note**: A label wider than its card overflows **both** left and right — widening the rect to the text's right edge fixes the width problem, so this case IS auto-fixed; any remaining left/top component is reported in the issue's `fix.residual` field. Two cases are never auto-fixed and are skipped with a clear message: **pure left/top overflow** (widening only grows right/down, so it can never reach the text) and **transformed cards** (a rect with a `transform`, or inside a transformed `<g>` — its `width`/`height` live in pre-transform space, so editing them would not grow the rendered box; these carry `fixable=false` and must be edited manually).
+
 ### 2. Phase 2: `rect_viewbox` — The card itself overflows the SVG canvas
 
 **Typical case**: A `<rect>`'s x/y/width/height values place it partially outside the `viewBox`, causing clipping.
@@ -151,7 +153,7 @@ svg-guard uses `getBBox()` + `getCTM()` in the **SVG's own user coordinate syste
 - The diagram looks tiny with massive empty space below/right
 
 **Detection logic** (both conditions must be true):
-- Content coverage < `coverage_threshold` (default 0.5)
+- Content coverage < `coverage_threshold` (default 0.5) — coverage is the **sum of each element's own bbox area ÷ viewBox area** (true ink), not the area of the union bounding box, so a spread-out multi-card diagram isn't mis-measured as "full"
 - Content centroid is offset from center by more than `center_offset_threshold`
 
 **Fix**: Intelligently crop the `viewBox` tightly around the content (with `crop_pad` padding) so the graphic is centered and fills the frame nicely.
@@ -299,6 +301,8 @@ svg-guard fix --dir ./diagrams --dry-run   # Preview only
 svg-guard fix --dir ./diagrams             # Apply fixes + backup
 ```
 
+The summary counts honestly: `Applied 3 fix(es); 2 issue(s) skipped as not auto-fixable (manual edit needed)`. Skips (render errors, transformed cards, pure left/top overflow) are listed per-file with `[skip]` and never counted as fixes.
+
 ### `svg-guard report`
 
 One-command report generation:
@@ -391,6 +395,9 @@ A: No — the tool preserves original indentation and attribute order as much as
 
 **Q: Can I detect without fixing?**  
 A: Yes — use `check` or `fix --dry-run`.
+
+**Q: What happens to broken/malformed SVG files?**  
+A: They are reported as **render errors**, never as clean passes. A file the browser can't parse as SVG makes `check` exit with code 2, and the JSON report carries an `"error"` field for it — so CI never goes green on a corrupt file.
 
 **Q: Detection is slow?**  
 A: First Chromium launch is slow. Reuse the same `BrowserRunner()` instance for batch processing.

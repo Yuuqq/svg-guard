@@ -127,13 +127,22 @@ def _cmd_fix(args: argparse.Namespace) -> None:
     results, total_issues = check_directory(args.dir)
     had_render_errors = _has_render_errors(results)
 
-    total_fixes = 0
+    # Separate real modifications from skip notices. fix_svg() reports both in
+    # one list of strings; a skip notice always contains the word "skipped".
+    # Counting skips as "fixes" made the summary claim "Applied N fixes" even
+    # when every issue was unfixable and no byte was written — misleading.
+    def _is_skip(msg: str) -> bool:
+        return "skipped" in msg
+
+    total_applied = 0
+    total_skipped = 0
     for name, result in results.items():
         if result.ok:
             continue
         if result.error is not None:
             # Can't fix a file we failed to measure; surface it but skip writing.
             print(f"  [skip] {name}: render error, not fixable ({result.error})")
+            total_skipped += 1
             continue
         changes = fix_svg(
             result.path,
@@ -141,19 +150,29 @@ def _cmd_fix(args: argparse.Namespace) -> None:
             backup=not args.no_backup,
             dry_run=args.dry_run,
         )
-        if changes:
-            total_fixes += len(changes)
-            mode = "would fix" if args.dry_run else "fixed"
-            for change in changes:
-                print(f"  [{mode}] {name}: {change}")
+        applied = [c for c in changes if not _is_skip(c)]
+        skipped = [c for c in changes if _is_skip(c)]
+        total_applied += len(applied)
+        total_skipped += len(skipped)
+        mode = "would fix" if args.dry_run else "fixed"
+        for change in applied:
+            print(f"  [{mode}] {name}: {change}")
+        for change in skipped:
+            print(f"  [skip] {name}: {change}")
 
-    if total_fixes == 0:
+    if total_applied == 0 and total_skipped == 0:
         print("No fixable issues found.")
     else:
         action = "Would apply" if args.dry_run else "Applied"
-        print(f"\n{action} {total_fixes} fixes.")
+        summary = f"\n{action} {total_applied} fix(es)"
+        if total_skipped:
+            summary += (
+                f"; {total_skipped} issue(s) skipped as not auto-fixable "
+                f"(manual edit needed)"
+            )
+        print(summary + ".")
 
-    if args.dry_run and total_fixes > 0:
+    if args.dry_run and total_applied > 0:
         print("Run without --dry-run to apply changes.")
 
     # Exit 2 if any file failed to render (couldn't be processed at all);

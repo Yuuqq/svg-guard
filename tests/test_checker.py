@@ -127,6 +127,51 @@ class TestCheckSvg:
             "centered-but-sparse content must not trigger content_misfit"
         )
 
+    def test_both_sides_text_overflow_is_fixable(self, page):
+        # A text wider than its rect overflows BOTH left and right. The old
+        # code marked it fixable=false and skipped it entirely. Widening the
+        # rect to the text's right edge resolves the width problem, so the
+        # issue must now carry a positive expand_w and be fixable.
+        result = check_svg(page, FIXTURES / "text_overflow_both.svg")
+        assert not result.ok
+        tr = [i for i in result.issues if i.type == "text_rect"]
+        assert tr, "expected a text_rect issue"
+        issue = tr[0]
+        assert "left" in issue.direction and "right" in issue.direction
+        assert issue.fix.get("expand_w", 0) > 0, (
+            f"both-sides overflow should be fixable, got fix={issue.fix}"
+        )
+        assert issue.fix.get("fixable") is True
+        # The left residual is reported so callers know the rect still
+        # doesn't fully contain the text on that side.
+        assert "left" in (issue.fix.get("residual") or "")
+
+    def test_spread_cards_not_misfit(self, page):
+        # Two cards in opposite corners: the union bbox spans most of the
+        # canvas, but the actual ink covers a modest fraction. Under the new
+        # per-element ink coverage this must NOT be flagged as content_misfit
+        # (the old union-bbox measure mis-measured it either way).
+        result = check_svg(page, FIXTURES / "spread_cards.svg")
+        assert all(i.type != "content_misfit" for i in result.issues), (
+            f"spread-out cards must not be flagged content_misfit: "
+            f"{[(i.type, i.text) for i in result.issues]}"
+        )
+
+    def test_transformed_rect_flagged_unfixable(self, page):
+        # A rect with a rotate() transform: editing width/height (pre-transform
+        # local space) won't grow the rendered box by the measured amount, so
+        # the checker must mark the issue unfixable and carry transformed=true.
+        result = check_svg(page, FIXTURES / "transformed_rect_overflow.svg")
+        assert not result.ok
+        tr = [i for i in result.issues if i.type == "text_rect"]
+        assert tr, "expected a text_rect issue for the overflowing rotated card"
+        issue = tr[0]
+        assert issue.fix.get("transformed") is True
+        assert issue.fix.get("fixable") is False
+        # No deltas emitted — the fixer must not touch the width.
+        assert issue.fix.get("expand_w", 0) == 0
+        assert issue.fix.get("expand_h", 0) == 0
+
 
 class TestDetectionConfig:
     def test_as_js_round_trips_all_thresholds(self):

@@ -21,8 +21,18 @@ logger = logging.getLogger("svg_guard")
 JS_DETECT = r"""
 (cfg) => {
   const results = [];
-  const svg = document.querySelector('svg');
-  if (!svg) return { issues: [], viewBox: null };
+  // A file the browser loaded as an XML document has an <svg> DOCUMENT
+  // ELEMENT. If the XML failed to parse, Chromium swaps in an HTML error
+  // page whose root is <html> and which contains a <parsererror> node — and
+  // querySelector('svg') can still match a stray <svg> tag inside the error
+  // text. So the only reliable "is this a real SVG" test is the document
+  // element's tagName, not the presence of any <svg> descendant.
+  const root = document.documentElement;
+  if (!root || root.tagName.toLowerCase() !== 'svg'
+      || document.querySelector('parsererror')) {
+    return { issues: [], viewBox: null };
+  }
+  const svg = root;
 
   const vb = svg.viewBox.baseVal;
   const svgW = vb.width || parseFloat(svg.getAttribute('width')) || svg.clientWidth;
@@ -83,7 +93,17 @@ JS_DETECT = r"""
         height: rect.getAttribute('height') || '0',
         fill: rect.getAttribute('fill') || '',
         class: rect.getAttribute('class') || ''
-      }
+      },
+      // A rect carrying a transform (or inside a transformed <g>) can't be
+      // auto-fixed by editing its width/height attributes: those live in the
+      // pre-transform local space, so adding N to width doesn't grow the
+      // rendered (post-transform) box by N. The checker measures everything
+      // in post-transform viewBox space, so the emitted expand deltas would
+      // be applied to the wrong coordinate frame and the fix would silently
+      // under- or over-shoot. Flag such rects so the fixer skips them with a
+      // clear message instead of writing a wrong width.
+      transformed: !!(rect.getAttribute('transform')
+        || (rect.closest('[transform]') !== null))
     });
   }
 
@@ -153,17 +173,28 @@ JS_DETECT = r"""
       // Expanding a rect's width/height grows it toward the bottom-right.
       // That can only COVER right/bottom overflow; left/top overflow (text
       // starts before the rect's left/top edge) would remain no matter how
-      // wide/tall the rect gets, so re-checking after a fix would re-report
-      // the same left/top issue forever (a fix loop). Mark such issues as
-      // not auto-fixable so the fixer skips them with a clear message
-      // instead of churning the file.
-      const fixable = !oL && !oT;
-      const extraW = fixable
-        ? Math.max(0, (bbox.x + bbox.w) - (px.x + px.w + pad))
+      // wide/tall the rect gets. But a text that overflows BOTH left and
+      // right (wider than its rect, centered) used to be marked entirely
+      // unfixable and skipped — even though widening the rect to cover the
+      // right edge is a strict improvement. So:
+      //   - any right/bottom component is ALWAYS fixable (emit the deltas);
+      //   - left/top components that remain are reported as residual so the
+      //     caller knows the rect still doesn't fully contain the text.
+      // This turns the common "CJK label wider than its card" case from
+      // "detected but never fixed" into "card widened, text fits width-wise".
+      const expandW = oR
+        ? Math.max(0, (bbox.x + bbox.w) - (px.x + px.w + pad)) + cfg.fixPad
         : 0;
-      const extraH = fixable
-        ? Math.max(0, (bbox.y + bbox.h) - (px.y + px.h + pad))
+      const expandH = oB
+        ? Math.max(0, (bbox.y + bbox.h) - (px.y + px.h + pad)) + cfg.fixPad
         : 0;
+      // A transformed rect can't be fixed by editing width/height (they're
+      // in pre-transform local space), so force unfixable regardless of
+      // whether a right/bottom component exists.
+      const fixable = (oR || oB) && !parent.transformed;
+      const residual = [];
+      if (oL) residual.push('left');
+      if (oT) residual.push('top');
 
       results.push({
         type: 'text_rect',
@@ -176,9 +207,11 @@ JS_DETECT = r"""
           attrs: parent.attrs
         },
         fix: {
-          expand_w: Math.round(extraW) + (fixable ? cfg.fixPad : 0),
-          expand_h: Math.round(extraH) + (fixable ? cfg.fixPad : 0),
-          fixable: fixable
+          expand_w: fixable ? Math.round(expandW) : 0,
+          expand_h: fixable ? Math.round(expandH) : 0,
+          fixable: fixable,
+          transformed: !!parent.transformed,
+          residual: residual.join('+')
         }
       });
     }
@@ -220,14 +253,22 @@ JS_DETECT = r"""
   // off-center slice of the viewBox (e.g. content shrunk into the top-left
   // corner — a file that "opens mostly blank") slips through the two phases
   // above: the cards sit inside the viewBox and the text sits inside its card,
-  // so neither overflow fires. We union every drawable element's bbox into a
-  // single content bbox, then flag when the content is BOTH sparse (low area
-  // coverage) AND off-center — the AND avoids flagging a legitimately sparse
-  // but centered layout (a label in the middle of a big canvas).
+  // so neither overflow fires. We flag when the content is BOTH sparse AND
+  // off-center — the AND avoids flagging a legitimately sparse but centered
+  // layout (a label in the middle of a big canvas).
+  //
+  // Coverage = the SUM of each drawable's own bbox area ÷ viewBox area, NOT
+  // the area of the union bounding box. The old union-bbox measure blew up on
+  // any multi-element layout: two cards in opposite corners have a huge union
+  // bbox (≈ the whole canvas) even though the actual ink covers a fraction of
+  // it, so a genuinely spread-out diagram was never flagged, while a tight
+  // cluster in one corner (the real "shrunk into a corner" case) measured the
+  // same under both. Summing per-element area measures true ink coverage.
   var drawableSel = 'rect, text, path, circle, ellipse, line, polygon, '
                   + 'polyline, image, use';
   var drawable = svg.querySelectorAll(drawableSel);
   var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  var inkArea = 0;
   var found = false;
   for (var d = 0; d < drawable.length; d++) {
     var db = getUserBox(drawable[d]);
@@ -240,6 +281,7 @@ JS_DETECT = r"""
       continue;
     }
     found = true;
+    inkArea += db.w * db.h;
     if (db.x < minX) minX = db.x;
     if (db.y < minY) minY = db.y;
     if (db.x + db.w > maxX) maxX = db.x + db.w;
@@ -248,7 +290,7 @@ JS_DETECT = r"""
 
   if (found) {
     var cw = maxX - minX, ch = maxY - minY;
-    var coverage = (cw * ch) / (svgW * svgH);
+    var coverage = inkArea / (svgW * svgH);
     var cx = minX + cw / 2, cy = minY + ch / 2;
     // Normalized distance of the content centroid from the viewBox center: 0
     // means dead-center, ~1 means flush against an edge.
@@ -417,6 +459,20 @@ def check_svg(
         pass  # non-fatal: measure with whatever fonts are available
 
     raw: dict[str, Any] = page.evaluate(JS_DETECT, cfg.as_js())
+
+    # A file the browser can't parse as SVG (malformed XML, or not an SVG at
+    # all) makes the probe return viewBox=null with zero issues — which the
+    # old code returned as ok=True. That meant CI went green on corrupt SVGs.
+    # Treat "no measurable SVG root" as a render error so the file is surfaced
+    # (CLI exit 2, JSON error field, report banner) instead of passing silently.
+    if raw.get("viewBox") is None:
+        return CheckResult(
+            path=svg_path,
+            issues=[],
+            viewBox=None,
+            error="no renderable <svg> root (malformed XML or not an SVG file)",
+        )
+
     issues = [Issue.from_raw(r) for r in raw.get("issues", [])]
     return CheckResult(path=svg_path, issues=issues, viewBox=raw.get("viewBox"))
 
@@ -507,6 +563,14 @@ def check_directory(
                 continue
 
             results[svg_path.name] = result
+            if result.error is not None:
+                # check_svg returned a render error (e.g. no parseable <svg>
+                # root) rather than raising. Surface it exactly like the
+                # exception path above so the CLI/CI log shows [ERR] and the
+                # file is never mistaken for a clean pass.
+                logger.warning("  [ERR] %s: %s", svg_path.name, result.error)
+                total_errors += 1
+                continue
             if not result.ok:
                 total_issues += len(result.issues)
                 for issue in result.issues:

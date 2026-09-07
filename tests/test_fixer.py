@@ -112,6 +112,57 @@ class TestFixUnfixableLeftOverflow:
         assert len(result2.issues) <= before
 
 
+class TestFixBothSidesOverflow:
+    def test_wide_centered_text_widens_rect(self, page, tmp_path):
+        # A centered text wider than its rect overflows both left and right.
+        # The fixer must widen the rect (not skip it), and the width must grow.
+        svg_path = _copy_fixture("text_overflow_both.svg", tmp_path)
+        result = check_svg(page, svg_path)
+        assert not result.ok
+
+        changes = fix_svg(svg_path, result.issues, backup=False)
+        # A real modification (not a skip) was applied.
+        assert any("width" in c for c in changes), f"expected a widen: {changes}"
+        assert not any("skipped" in c for c in changes)
+
+        modified = svg_path.read_text(encoding="utf-8")
+        assert 'width="140"' not in modified, "rect width should have grown"
+
+    def test_wide_centered_text_reduces_right_overflow(self, page, tmp_path):
+        # After widening, re-checking must no longer report a RIGHT overflow
+        # for that text (the right edge now reaches past the text's right).
+        svg_path = _copy_fixture("text_overflow_both.svg", tmp_path)
+        result1 = check_svg(page, svg_path)
+        fix_svg(svg_path, result1.issues, backup=False)
+        result2 = check_svg(page, svg_path)
+        for i in result2.issues:
+            if i.type == "text_rect":
+                assert "right" not in i.direction, (
+                    f"right overflow should be resolved: {i.direction}"
+                )
+
+
+class TestFixTransformedRect:
+    def test_transformed_rect_is_skipped_not_rewritten(self, page, tmp_path):
+        # A rect with a transform must NOT have its width/height edited (the
+        # measured deltas are in post-transform space). The fixer skips it
+        # with a clear message and leaves the geometry untouched.
+        svg_path = _copy_fixture("transformed_rect_overflow.svg", tmp_path)
+        result = check_svg(page, svg_path)
+        assert not result.ok
+
+        original = svg_path.read_text(encoding="utf-8")
+        changes = fix_svg(svg_path, result.issues, backup=False)
+        assert any("skipped" in c and "transformed" in c for c in changes), (
+            f"expected a transformed-skip message, got: {changes}"
+        )
+        # The rect's width/height are unchanged — no wrong write.
+        assert 'width="120"' in svg_path.read_text(encoding="utf-8")
+        assert 'height="80"' in svg_path.read_text(encoding="utf-8")
+        # File content is byte-identical apart from nothing (skip = no edit).
+        assert svg_path.read_text(encoding="utf-8") == original
+
+
 class TestFixBackup:
     def test_backup_created_by_default(self, page, tmp_path):
         svg_path = _copy_fixture("text_overflow.svg", tmp_path)

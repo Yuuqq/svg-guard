@@ -232,8 +232,12 @@ def _fmt_fix(fix: dict) -> tuple[str, bool]:
     if not isinstance(fix, dict) or not fix:
         return "", True
 
-    # Explicit fixable=False (left/top overflow the fixer must skip).
+    # Explicit fixable=False: either a transformed rect (width/height live in
+    # pre-transform space, so the fixer can't edit them safely) or a pure
+    # left/top overflow (widening grows rightward/downward, can't help).
     if fix.get("fixable") is False:
+        if fix.get("transformed"):
+            return "not auto-fixable (transformed rect)", False
         return "not auto-fixable (move element)", False
 
     # content_misfit crop.

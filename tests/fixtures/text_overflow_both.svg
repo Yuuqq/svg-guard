@@ -1,0 +1,9 @@
+<svg viewBox="0 0 400 200" width="400" height="200" xmlns="http://www.w3.org/2000/svg">
+  <!-- Text centered via text-anchor="middle" that is WIDER than its rect:
+       it overflows BOTH left and right. Unlike pure left/top overflow, this
+       IS auto-fixable, because widening the rect to the text right edge
+       resolves the width problem. Locks the no-longer-skipped-wholesale fix. -->
+  <rect x="100" y="60" width="140" height="80" fill="#dbeafe" stroke="#3b82f6" rx="8"/>
+  <text x="170" y="105" text-anchor="middle" font-family="sans-serif"
+        font-size="20" fill="#1e3a8a">wide centered title text here</text>
+</svg>

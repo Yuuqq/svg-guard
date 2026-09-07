@@ -1,0 +1,14 @@
+<svg viewBox="0 0 800 600" width="800" height="600" xmlns="http://www.w3.org/2000/svg">
+  <!-- Two cards in OPPOSITE corners. Their union bounding box spans most of
+       the canvas, but the actual ink (the two cards + labels) covers only a
+       fraction. The old union-bbox coverage measure would never flag this as
+       content_misfit; it must also NOT be flagged under per-element ink
+       coverage, because the content is large and reasonably distributed.
+       This is the Phase 3 false-positive regression guard. -->
+  <rect x="60" y="60" width="240" height="130" rx="12" fill="#fef3c7" stroke="#d97706"/>
+  <text x="180" y="130" text-anchor="middle" font-family="sans-serif"
+        font-size="18" fill="#78350f">source connector</text>
+  <rect x="500" y="410" width="240" height="130" rx="12" fill="#e0e7ff" stroke="#4f46e5"/>
+  <text x="620" y="480" text-anchor="middle" font-family="sans-serif"
+        font-size="18" fill="#312e81">output renderer</text>
+</svg>

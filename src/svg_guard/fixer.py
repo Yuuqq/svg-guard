@@ -94,22 +94,37 @@ def fix_svg(
     # each direction so nothing is silently under-fixed (and so the second
     # issue isn't left looking for an already-rewritten width="...").
     #
-    # Left/top text overflow (text starts before the rect's left/top edge) is
-    # NOT auto-fixable — widening the rect grows it toward the bottom-right and
-    # can never cover text that's to the left/above it, so re-checking would
-    # re-report the same issue forever (a fix loop). The checker marks such
-    # issues fix=false; here we surface them as skipped with a clear reason
-    # instead of churning the file.
+    # A text_rect issue is fixable whenever the checker emitted a non-zero
+    # expand_w/expand_h (right/bottom component). A text wider than its rect
+    # overflows BOTH left and right; widening the rect covers the right side,
+    # which resolves the width problem — so we no longer skip those wholesale.
+    # Only a PURE left/top overflow (no right/bottom component) is skipped,
+    # since widening can never reach text that starts before the rect's
+    # left/top edge. Residual left/top components are surfaced in the message.
     grouped: dict[tuple, dict] = {}
     order: list[tuple] = []
     for issue in issues:
         if issue.type != "text_rect":
             continue
-        if issue.fix.get("fixable") is False:
-            changes.append(
-                f'text "{(issue.text or "").strip()[:40]}" skipped: '
-                f"left/top overflow needs manual repositioning"
-            )
+        ew = issue.fix.get("expand_w", 0) or 0
+        eh = issue.fix.get("expand_h", 0) or 0
+        if ew <= 0 and eh <= 0:
+            # Distinguish the two unfixable causes so the user knows why.
+            if issue.fix.get("transformed"):
+                # Rect is transformed (or inside a transformed group): editing
+                # width/height in pre-transform local space wouldn't grow the
+                # rendered box by the measured amount. Skip rather than write
+                # a wrong width.
+                changes.append(
+                    f'text "{(issue.text or "").strip()[:40]}" skipped: '
+                    f"parent rect is transformed; edit width/height manually"
+                )
+            else:
+                # Pure left/top overflow: nothing the rect can grow into.
+                changes.append(
+                    f'text "{(issue.text or "").strip()[:40]}" skipped: '
+                    f"left/top overflow needs manual repositioning"
+                )
             continue
         attrs = issue.parent.get("attrs", {})
         dom_index = issue.parent.get("domIndex")
