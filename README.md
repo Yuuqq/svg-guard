@@ -430,4 +430,22 @@ MIT License
 **Make every SVG crisp, professional, and overflow-free!**  
 svg-guard — Your SVG Quality Guardian 🛡️
 
-> This is an enhanced version with illustrations, Mermaid diagrams, beginner-friendly steps, detailed parameter explanations, and real before/after SVG examples.
+> This is an enhanced version with illustrations, Mermaid diagrams, beginner-friendly steps, detailed parameter explanations, and real before/after SVG examples.---
+
+## 🌏 CJK Demo
+
+We provide a dedicated CJK (Chinese, Japanese, Korean) text overflow demonstration in `examples/cjk/`. This demonstrates how `svg-guard` works end-to-end on Chinese text, adjusting overflowing nodes with real browser rendering.
+
+**To run the CJK demo:**
+1. Ensure you have CJK fonts installed in your system (e.g., `sudo apt-get install -y fonts-noto-cjk fonts-wqy-zenhei` on Ubuntu).
+2. Run the provided runner script:
+   ```bash
+   python scripts/run_cjk_demo.py
+   ```
+   Or alternatively, run the CLI manually:
+   ```bash
+   python -m svg_guard check --dir examples/cjk --html examples/cjk/out/report.html --json examples/cjk/out/report.json -v
+   python -m svg_guard fix --dir examples/cjk
+   ```
+
+The script will automatically generate visual `report.html` and `report.json` artifacts inside `examples/cjk/out/` and then apply fixes. The script also preserves the original input while outputting the fixed SVG as `.fixed.svg`.

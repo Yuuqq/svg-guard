@@ -349,4 +349,22 @@ MIT License
 **让每张 SVG 都清晰、专业、无溢出！**  
 svg-guard —— 你的 SVG 质量守护者 🛡️
 
-> 本 README 为增强版，相比原版增加了大量图解、 Mermaid 流程图、新手步骤、参数中文解释和实际效果示意图。欢迎使用！
+> 本 README 为增强版，相比原版增加了大量图解、 Mermaid 流程图、新手步骤、参数中文解释和实际效果示意图。欢迎使用！---
+
+## 🌏 中文/CJK 溢出演示 (CJK Demo)
+
+我们在 `examples/cjk/` 目录下提供了一个专门针对中文（CJK）文本溢出的端到端演示。这展示了 `svg-guard` 如何通过真实的浏览器渲染，准确地测量和修复中文文本溢出问题。
+
+**运行 CJK 演示的方法：**
+1. 请确保您的系统中安装了中文字体（例如在 Ubuntu 上：`sudo apt-get install -y fonts-noto-cjk fonts-wqy-zenhei`）。
+2. 运行提供的演示脚本：
+   ```bash
+   python scripts/run_cjk_demo.py
+   ```
+   或者手动执行以下 CLI 命令：
+   ```bash
+   python -m svg_guard check --dir examples/cjk --html examples/cjk/out/report.html --json examples/cjk/out/report.json -v
+   python -m svg_guard fix --dir examples/cjk
+   ```
+
+脚本将在 `examples/cjk/out/` 目录中自动生成可视化的 `report.html` 和 `report.json` 报告，然后执行修复操作，同时保留原文件并将修复结果输出为 `.fixed.svg`。
