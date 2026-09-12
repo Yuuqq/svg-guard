@@ -1,0 +1,74 @@
+{
+  "flowchart_overflow.svg": [
+    {
+      "type": "text_rect",
+      "text": "分布式系统核心微服务架构",
+      "direction": "right",
+      "svg": {
+        "x": 159,
+        "y": 108,
+        "w": 289,
+        "h": 27
+      },
+      "parent": {
+        "domIndex": 0,
+        "svg": {
+          "x": 150,
+          "y": 100,
+          "w": 180,
+          "h": 60
+        },
+        "attrs": {
+          "x": "150",
+          "y": "100",
+          "width": "180",
+          "height": "60",
+          "fill": "#e6f7ff",
+          "class": ""
+        }
+      },
+      "fix": {
+        "expand_w": 119,
+        "expand_h": 0,
+        "fixable": true,
+        "transformed": false,
+        "residual": ""
+      }
+    },
+    {
+      "type": "text_rect",
+      "text": "高性能缓存与负载均衡集群",
+      "direction": "right",
+      "svg": {
+        "x": 160,
+        "y": 258,
+        "w": 288,
+        "h": 27
+      },
+      "parent": {
+        "domIndex": 1,
+        "svg": {
+          "x": 150,
+          "y": 250,
+          "w": 180,
+          "h": 60
+        },
+        "attrs": {
+          "x": "150",
+          "y": "250",
+          "width": "180",
+          "height": "60",
+          "fill": "#f6ffed",
+          "class": ""
+        }
+      },
+      "fix": {
+        "expand_w": 119,
+        "expand_h": 0,
+        "fixable": true,
+        "transformed": false,
+        "residual": ""
+      }
+    }
+  ]
+}

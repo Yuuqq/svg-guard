@@ -1,0 +1,15 @@
+<svg viewBox="0 0 600 400" width="600" height="400" xmlns="http://www.w3.org/2000/svg">
+  <!-- Use a flowchart-like style -->
+  <!-- Remove background rect so it doesn't accidentally catch the text! -->
+
+  <rect x="150" y="100" width="299" height="60" rx="4" fill="#e6f7ff" stroke="#1890ff" stroke-width="2"/>
+  <!-- 12 chars * 24px = 288px wide. Start at 160. Center = 160+144 = 304. Rect is [150, 330], so 304 is inside! -->
+  <text x="160" y="130" font-family="sans-serif" font-size="24" font-weight="bold" fill="#000000">分布式系统核心微服务架构</text>
+
+  <rect x="150" y="250" width="299" height="60" rx="4" fill="#f6ffed" stroke="#52c41a" stroke-width="2"/>
+  <!-- 12 chars * 24px = 288px wide. Start at 160. Center = 304. Rect is [150, 330], so 304 is inside! -->
+  <text x="160" y="280" font-family="sans-serif" font-size="24" font-weight="bold" fill="#000000">高性能缓存与负载均衡集群</text>
+
+  <rect x="10" y="10" width="80" height="40" fill="#ccc" opacity="0"/>
+  <rect x="510" y="350" width="80" height="40" fill="#ccc" opacity="0"/>
+</svg>
