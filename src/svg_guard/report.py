@@ -30,6 +30,7 @@ _TYPE_LABEL: dict[str, str] = {
     "text_rect": "text→rect",
     "rect_viewbox": "rect→viewBox",
     "text_viewbox": "text→viewBox",
+    "text_foreign": "text→html",
     "content_misfit": "misfit",
 }
 
@@ -167,22 +168,33 @@ _JS = """
 """
 
 
-def _viewbox_dims(result: CheckResult) -> tuple[float, float] | None:
-    """Best-effort (w, h) of the SVG's viewBox for overlay alignment.
+def _viewbox_dims(result: CheckResult) -> tuple[float, float, float, float] | None:
+    """Best-effort (x, y, w, h) of the SVG's viewBox for overlay alignment.
 
     Prefers the measured viewBox the checker stored on the result; falls
-    back to parsing the source file's viewBox attribute.
+    back to parsing the source file's viewBox attribute. Origins other than
+    0 are kept so the red boxes sit on the drawing, not on a shifted canvas.
     """
     vb = result.viewBox
     if isinstance(vb, dict) and vb.get("w") and vb.get("h"):
-        return float(vb["w"]), float(vb["h"])
+        return (
+            float(vb.get("x") or 0),
+            float(vb.get("y") or 0),
+            float(vb["w"]),
+            float(vb["h"]),
+        )
     try:
         src = read_svg(result.path)
     except OSError:
         return None
     m = _VIEWBOX_RE.search(src)
     if m:
-        return float(m.group(3)), float(m.group(4))
+        return (
+            float(m.group(1)),
+            float(m.group(2)),
+            float(m.group(3)),
+            float(m.group(4)),
+        )
     return None
 
 
@@ -237,6 +249,9 @@ def _fmt_fix(fix: dict) -> tuple[str, bool]:
     # left/top overflow (widening grows rightward/downward, can't help).
     if fix.get("fixable") is False:
         if fix.get("transformed"):
+            foreign = fix.get("foreign")
+            if isinstance(foreign, dict) and foreign.get("transformed"):
+                return "not auto-fixable (transformed foreignObject)", False
             return "not auto-fixable (transformed rect)", False
         return "not auto-fixable (move element)", False
 
@@ -254,20 +269,47 @@ def _fmt_fix(fix: dict) -> tuple[str, bool]:
     dh = fix.get("expand_viewbox_h", 0)
     if dw or dh:
         try:
-            return f"expand viewBox +{int(dw)}w +{int(dh)}h", True
+            label = f"expand viewBox +{int(dw)}w +{int(dh)}h"
         except (TypeError, ValueError):
             return "", True
+        foreign_label = _foreign_label(fix)
+        if foreign_label:
+            label = f"{label}; {foreign_label}"
+        return label, True
+
+    foreign_label = _foreign_label(fix)
 
     # text_rect card expansion.
     ew = fix.get("expand_w", 0)
     eh = fix.get("expand_h", 0)
     if ew or eh:
         try:
-            return f"expand rect +{int(ew)}w +{int(eh)}h", True
+            label = f"expand rect +{int(ew)}w +{int(eh)}h"
         except (TypeError, ValueError):
-            return "", True
+            label = ""
+        if foreign_label:
+            label = f"{label}; {foreign_label}" if label else foreign_label
+        return label, True
+
+    if foreign_label:
+        return foreign_label, True
 
     return "", True
+
+
+def _foreign_label(fix: dict) -> str:
+    """Width/height growth for a clipped <foreignObject>, or ''."""
+    foreign = fix.get("foreign")
+    if not isinstance(foreign, dict):
+        return ""
+    ew = foreign.get("expand_w") or 0
+    eh = foreign.get("expand_h") or 0
+    if not ew and not eh:
+        return ""
+    try:
+        return f"expand foreignObject +{int(ew)}w +{int(eh)}h"
+    except (TypeError, ValueError):
+        return ""
 
 
 def _dir_class(direction: str) -> str:
@@ -293,7 +335,7 @@ def _render_preview(result: CheckResult) -> str:
     vb = _viewbox_dims(result)
     if vb is None:
         return ""
-    vbw, vbh = vb
+    vbx, vby, vbw, vbh = vb
 
     # Try to inline the real SVG as an <img> (data URI) so the preview shows
     # the actual rendering. Skip if the file is missing or too large.
@@ -352,7 +394,7 @@ def _render_preview(result: CheckResult) -> str:
         )
 
     overlay = (
-        f'<svg class="overlay" viewBox="0 0 {vbw:.0f} {vbh:.0f}" '
+        f'<svg class="overlay" viewBox="{vbx:.0f} {vby:.0f} {vbw:.0f} {vbh:.0f}" '
         f'preserveAspectRatio="xMidYMid meet" '
         f'xmlns="http://www.w3.org/2000/svg">' + "".join(overlay_shapes) + "</svg>"
     )

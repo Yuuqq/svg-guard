@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -34,39 +35,104 @@ JS_DETECT = r"""
   }
   const svg = root;
 
+  // Visible range is the viewBox rectangle, whose origin is often NOT 0
+  // (Inkscape, cropped exports, "100 50 800 600"). Comparing against
+  // [0, width] x [0, height] both misses content sitting outside a shifted
+  // viewBox and invents overflow for content that is actually on-canvas.
   const vb = svg.viewBox.baseVal;
-  const svgW = vb.width || parseFloat(svg.getAttribute('width')) || svg.clientWidth;
-  const svgH = vb.height || parseFloat(svg.getAttribute('height')) || svg.clientHeight;
+  const hasVb = !!(vb && vb.width > 0 && vb.height > 0);
+  const vbX = hasVb ? vb.x : 0;
+  const vbY = hasVb ? vb.y : 0;
+  const svgW = hasVb
+    ? vb.width
+    : (parseFloat(svg.getAttribute('width')) || svg.clientWidth);
+  const svgH = hasVb
+    ? vb.height
+    : (parseFloat(svg.getAttribute('height')) || svg.clientHeight);
+  const vbR = vbX + svgW;
+  const vbB = vbY + svgH;
 
-  // getUserBox(el): return the element's axis-aligned bounding box in the
-  // ROOT svg's user coordinate system (viewBox space), INCLUDING any
-  // transforms applied to the element or its ancestors.
-  //
-  // getBoundingClientRect() (the old approach) returns CSS pixels and is
-  // distorted by viewport scaling — when the viewBox aspect ratio differs
-  // from the viewport's, scaleX != scaleY and every downstream comparison is
-  // skewed. getBBox() returns user units in the element's LOCAL coordinate
-  // system (no transforms); we then fold in getCTM() (local -> root svg user
-  // units, accumulating all transforms incl. nested <svg> and rotate) to land
-  // in a single consistent space. No viewport scaling is involved at all.
+  // Symbols, markers and <defs> are not drawn. Measuring them reports
+  // overflow the user never sees (a long unused label, a hidden card).
+  function skipEl(el) {
+    if (el.closest('defs, symbol, marker, clipPath, mask, pattern')) return true;
+    try {
+      const cs = getComputedStyle(el);
+      if (cs.display === 'none' || cs.visibility === 'hidden') return true;
+    } catch (e) { /* detached — measure it anyway */ }
+    return false;
+  }
+
+  // getCTM() maps into the nearest viewport, and a viewBox of
+  // "min-x min-y width height" adds translate(-min-x, -min-y). Viewport
+  // pixels therefore are not viewBox user units unless the origin is 0.
+  // Put that origin (and any uniform viewBox scale) back.
+  function absRootLen(name) {
+    const raw = svg.getAttribute(name);
+    if (!raw) return null;
+    const m = String(raw).trim().match(/^([+-]?\d*\.?\d+)(px)?$/);
+    return m ? parseFloat(m[1]) : null;
+  }
+  function rootUserFromViewport(px, py) {
+    const viewportW = absRootLen('width') || svg.clientWidth || svgW;
+    const viewportH = absRootLen('height') || svg.clientHeight || svgH;
+    if (!(viewportW > 0) || !(viewportH > 0) || !(svgW > 0) || !(svgH > 0)) {
+      return { x: px + vbX, y: py + vbY };
+    }
+    let scaleX = viewportW / svgW;
+    let scaleY = viewportH / svgH;
+    const par = (svg.getAttribute('preserveAspectRatio') || 'xMidYMid meet')
+      .trim().split(/\s+/);
+    const align = par[0] || 'xMidYMid';
+    const mode = par[1] || 'meet';
+    if (align !== 'none') {
+      const s = mode === 'slice' ? Math.max(scaleX, scaleY) : Math.min(scaleX, scaleY);
+      scaleX = s;
+      scaleY = s;
+    }
+    const extraX = viewportW - svgW * scaleX;
+    const extraY = viewportH - svgH * scaleY;
+    function frac(tok) {
+      if (tok === 'Min') return 0;
+      if (tok === 'Max') return 1;
+      return 0.5;
+    }
+    let dx = 0, dy = 0;
+    if (align !== 'none' && align.length >= 8) {
+      dx = extraX * frac(align.slice(1, 4));
+      dy = extraY * frac(align.slice(5, 8));
+    }
+    return {
+      x: (px - dx) / scaleX + vbX,
+      y: (py - dy) / scaleY + vbY
+    };
+  }
+  function localToUser(el, x, y) {
+    const ctm = el.getCTM();
+    if (!ctm) return { x: x, y: y };
+    const px = ctm.a * x + ctm.c * y + ctm.e;
+    const py = ctm.b * x + ctm.d * y + ctm.f;
+    // Nested <svg> viewports stop getCTM before the root viewBox. Don't
+    // apply the root origin there (nested_svg.svg only has to not crash).
+    if (el.nearestViewportElement && el.nearestViewportElement !== svg) {
+      return { x: px, y: py };
+    }
+    return rootUserFromViewport(px, py);
+  }
+
+  // getUserBox(el): axis-aligned box in the ROOT svg's user space (viewBox
+  // coordinates), including transforms on the element and its ancestors.
   function getUserBox(el) {
     let bb;
     try {
-      bb = el.getBBox();  // local user units, no transform
+      bb = el.getBBox();
     } catch (e) {
-      return null;  // not rendered / detached — skip this element
+      return null;
     }
-    const ctm = el.getCTM();  // null when el IS the viewport (root svg)
-    if (!ctm) return { x: bb.x, y: bb.y, w: bb.width, h: bb.height };
-    // getCTM() returns an SVGMatrix (a,b,c,d,e,f) with NO transformPoint
-    // method (that's on DOMMatrix). Apply it manually to each corner:
-    //   x' = a*x + c*y + e ,  y' = b*x + d*y + f
-    const tx = (x, y) => ({ x: ctm.a * x + ctm.c * y + ctm.e,
-                            y: ctm.b * x + ctm.d * y + ctm.f });
-    const p1 = tx(bb.x, bb.y);
-    const p2 = tx(bb.x + bb.width, bb.y);
-    const p3 = tx(bb.x, bb.y + bb.height);
-    const p4 = tx(bb.x + bb.width, bb.y + bb.height);
+    const p1 = localToUser(el, bb.x, bb.y);
+    const p2 = localToUser(el, bb.x + bb.width, bb.y);
+    const p3 = localToUser(el, bb.x, bb.y + bb.height);
+    const p4 = localToUser(el, bb.x + bb.width, bb.y + bb.height);
     const xs = [p1.x, p2.x, p3.x, p4.x];
     const ys = [p1.y, p2.y, p3.y, p4.y];
     const x = Math.min(...xs), y = Math.min(...ys);
@@ -80,6 +146,7 @@ JS_DETECT = r"""
     const rect = allRects[i];
     const box = getUserBox(rect);
     if (!box) continue;
+    if (skipEl(rect)) continue;
     // Skip tiny rects (decorative dots, dividers) — threshold is in user units
     // so it doesn't shift with viewport zoom like the old CSS-pixel filter.
     if (box.w < cfg.minRectW || box.h < cfg.minRectH) continue;
@@ -109,52 +176,106 @@ JS_DETECT = r"""
 
   const pad = cfg.pad;
 
-  // Phase 1: text -> parent rect overflow.
-  for (const txt of svg.querySelectorAll('text')) {
-    const bbox = getUserBox(txt);
-    if (!bbox) continue;
-    const cx = bbox.x + bbox.w / 2;
-    const cy = bbox.y + bbox.h / 2;
+  function contains(box, x, y) {
+    return x >= box.x && x <= box.x + box.w && y >= box.y && y <= box.y + box.h;
+  }
 
-    // Match text to its containing rect by center-point containment.
-    // All comparisons are now in viewBox user units (no viewport scaling).
-    let parent = null;
-    for (const box of boxes) {
-      if (cx >= box.svg.x && cx <= box.svg.x + box.svg.w &&
-          cy >= box.svg.y && cy <= box.svg.y + box.svg.h) {
-        parent = box;
-        break;
+  // Tightest rect that contains the anchor (the point the author placed),
+  // then the bbox center. Document order used to win, so a full-canvas
+  // background drawn first swallowed every label and card overflow was
+  // never reported. A label wider than its card also has its bbox center
+  // outside the card; the anchor is still inside, so we try that first.
+  function pickParent(anchor, bbox) {
+    function hitsAt(x, y) {
+      const hits = [];
+      for (const box of boxes) {
+        if (contains(box.svg, x, y)) hits.push(box);
       }
+      return hits;
     }
+    let hits = anchor ? hitsAt(anchor.x, anchor.y) : [];
+    if (!hits.length) {
+      hits = hitsAt(bbox.x + bbox.w / 2, bbox.y + bbox.h / 2);
+    }
+    if (!hits.length) return null;
+    hits.sort((a, b) => {
+      const da = a.svg.w * a.svg.h - b.svg.w * b.svg.h;
+      if (Math.abs(da) > 0.5) return da;
+      return b.domIndex - a.domIndex;
+    });
+    return hits[0];
+  }
+
+  function getAnchor(el) {
+    const rawX = el.getAttribute('x');
+    const rawY = el.getAttribute('y');
+    if (rawX == null || rawY == null) return null;
+    const x = parseFloat(String(rawX).trim().split(/[\s,]+/)[0]);
+    const y = parseFloat(String(rawY).trim().split(/[\s,]+/)[0]);
+    if (!isFinite(x) || !isFinite(y)) return null;
+    return localToUser(el, x, y);
+  }
+
+  function dirList(oL, oR, oT, oB) {
+    const dirs = [];
+    if (oL) dirs.push('left');
+    if (oR) dirs.push('right');
+    if (oT) dirs.push('top');
+    if (oB) dirs.push('bottom');
+    return dirs;
+  }
+
+  // extra: {foreign, clipped, clipDirection} for HTML inside <foreignObject>.
+  // Plain <text> passes null and keeps the original text_rect / text_viewbox
+  // payload (expand deltas, fixable, residual, transformed).
+  function reportBox(text, bbox, parent, extra) {
+    extra = extra || {};
+    const foreign = extra.foreign || null;
+    const clipped = !!extra.clipped;
+    const clipDirection = extra.clipDirection || '';
 
     if (!parent) {
-      // Orphan text: no containing rect. Only flag if it spills the viewBox.
+      // edgePad is a tolerance: spill by less than this and stay quiet.
+      // (The old test used it as an inset, so labels sitting near the
+      // canvas edge were flagged even though they were fully inside.)
       const edgePad = cfg.edgePad;
-      const oL = bbox.x < 0 + edgePad;
-      const oR = bbox.x + bbox.w > svgW - edgePad;
-      const oT = bbox.y < 0 + edgePad;
-      const oB = bbox.y + bbox.h > svgH - edgePad;
-      if (oL || oR || oT || oB) {
-        const dirs = [];
-        if (oL) dirs.push('left');
-        if (oR) dirs.push('right');
-        if (oT) dirs.push('top');
-        if (oB) dirs.push('bottom');
+      const oL = bbox.x < vbX - edgePad;
+      const oR = bbox.x + bbox.w > vbR + edgePad;
+      const oT = bbox.y < vbY - edgePad;
+      const oB = bbox.y + bbox.h > vbB + edgePad;
+      if (!(oL || oR || oT || oB)) {
+        if (!clipped) return;
+        const grow = foreign && (foreign.expand_w > 0 || foreign.expand_h > 0);
         results.push({
-          type: 'text_viewbox',
-          text: _clip(txt.textContent),
-          direction: dirs.join('+'),
+          type: 'text_foreign',
+          text: text,
+          direction: clipDirection || 'right',
           svg: _r(bbox),
           parent: { viewBox: { w: Math.round(svgW), h: Math.round(svgH) } },
           fix: {
-            // Only right/bottom overflow can be resolved by enlarging the
-            // canvas; left/top needs the text moved, which we can't do safely.
-            expand_viewbox_w: oR ? Math.round(bbox.x + bbox.w - svgW + cfg.fixPad) : 0,
-            expand_viewbox_h: oB ? Math.round(bbox.y + bbox.h - svgH + cfg.fixPad) : 0
+            expand_w: 0,
+            expand_h: 0,
+            fixable: !!grow,
+            transformed: !!(foreign && foreign.transformed),
+            foreign: foreign
           }
         });
+        return;
       }
-      continue;
+      const fix = {
+        expand_viewbox_w: oR ? Math.round(bbox.x + bbox.w - vbR + cfg.fixPad) : 0,
+        expand_viewbox_h: oB ? Math.round(bbox.y + bbox.h - vbB + cfg.fixPad) : 0
+      };
+      if (foreign) fix.foreign = foreign;
+      results.push({
+        type: 'text_viewbox',
+        text: text,
+        direction: dirList(oL, oR, oT, oB).join('+'),
+        svg: _r(bbox),
+        parent: { viewBox: { w: Math.round(svgW), h: Math.round(svgH) } },
+        fix: fix
+      });
+      return;
     }
 
     const px = parent.svg;
@@ -162,59 +283,162 @@ JS_DETECT = r"""
     const oR = bbox.x + bbox.w > px.x + px.w + pad;
     const oT = bbox.y < px.y - pad;
     const oB = bbox.y + bbox.h > px.y + px.h + pad;
+    if (!(oL || oR || oT || oB || clipped)) return;
 
-    if (oL || oR || oT || oB) {
-      const dirs = [];
-      if (oL) dirs.push('left');
-      if (oR) dirs.push('right');
-      if (oT) dirs.push('top');
-      if (oB) dirs.push('bottom');
-
-      // Expanding a rect's width/height grows it toward the bottom-right.
-      // That can only COVER right/bottom overflow; left/top overflow (text
-      // starts before the rect's left/top edge) would remain no matter how
-      // wide/tall the rect gets. But a text that overflows BOTH left and
-      // right (wider than its rect, centered) used to be marked entirely
-      // unfixable and skipped — even though widening the rect to cover the
-      // right edge is a strict improvement. So:
-      //   - any right/bottom component is ALWAYS fixable (emit the deltas);
-      //   - left/top components that remain are reported as residual so the
-      //     caller knows the rect still doesn't fully contain the text.
-      // This turns the common "CJK label wider than its card" case from
-      // "detected but never fixed" into "card widened, text fits width-wise".
-      const expandW = oR
-        ? Math.max(0, (bbox.x + bbox.w) - (px.x + px.w + pad)) + cfg.fixPad
-        : 0;
-      const expandH = oB
-        ? Math.max(0, (bbox.y + bbox.h) - (px.y + px.h + pad)) + cfg.fixPad
-        : 0;
-      // A transformed rect can't be fixed by editing width/height (they're
-      // in pre-transform local space), so force unfixable regardless of
-      // whether a right/bottom component exists.
-      const fixable = (oR || oB) && !parent.transformed;
-      const residual = [];
-      if (oL) residual.push('left');
-      if (oT) residual.push('top');
-
-      results.push({
-        type: 'text_rect',
-        text: _clip(txt.textContent),
-        direction: dirs.join('+'),
-        svg: _r(bbox),
-        parent: {
-          domIndex: parent.domIndex,
-          svg: _r(parent.svg),
-          attrs: parent.attrs
-        },
-        fix: {
-          expand_w: fixable ? Math.round(expandW) : 0,
-          expand_h: fixable ? Math.round(expandH) : 0,
-          fixable: fixable,
-          transformed: !!parent.transformed,
-          residual: residual.join('+')
-        }
-      });
+    const dirs = dirList(oL, oR, oT, oB);
+    if (!dirs.length && clipDirection) {
+      clipDirection.split('+').forEach((d) => { if (d) dirs.push(d); });
     }
+    // Widening grows toward the bottom-right, so it covers right/bottom
+    // overflow (including a label that sticks out of both sides). Pure
+    // left/top stays unfixable. A transformed rect's width lives in
+    // pre-transform space, so those deltas would land in the wrong frame.
+    const expandW = oR
+      ? Math.max(0, (bbox.x + bbox.w) - (px.x + px.w + pad)) + cfg.fixPad
+      : 0;
+    const expandH = oB
+      ? Math.max(0, (bbox.y + bbox.h) - (px.y + px.h + pad)) + cfg.fixPad
+      : 0;
+    const parentTransformed = !!parent.transformed;
+    const foTransformed = !!(foreign && foreign.transformed);
+    const onlyClip = clipped && !(oL || oR || oT || oB);
+    const rectFixable = (oR || oB) && !parentTransformed;
+    const foFixable = !!(foreign && (foreign.expand_w > 0 || foreign.expand_h > 0));
+    let fixable = onlyClip ? foFixable : rectFixable;
+    if (clipped && foTransformed) fixable = false;
+    const residual = [];
+    if (oL) residual.push('left');
+    if (oT) residual.push('top');
+    const fix = {
+      expand_w: rectFixable && !onlyClip ? Math.round(expandW) : 0,
+      expand_h: rectFixable && !onlyClip ? Math.round(expandH) : 0,
+      fixable: fixable,
+      transformed: parentTransformed || foTransformed,
+      residual: residual.join('+')
+    };
+    if (clipped && foTransformed) {
+      fix.expand_w = 0;
+      fix.expand_h = 0;
+    }
+    if (foreign) fix.foreign = foreign;
+    results.push({
+      type: onlyClip ? 'text_foreign' : 'text_rect',
+      text: text,
+      direction: dirs.join('+'),
+      svg: _r(bbox),
+      parent: {
+        domIndex: parent.domIndex,
+        svg: _r(parent.svg),
+        attrs: parent.attrs
+      },
+      fix: fix
+    });
+  }
+
+  // HTML clipped inside a <foreignObject>. Layout inside the FO is in CSS
+  // pixels that match the FO's local user units (its width attribute is the
+  // viewport width). scrollWidth - clientWidth is therefore already a user
+  // unit delta. Scaling it by the attribute width makes a second pass grow
+  // the box again instead of converging.
+  function htmlOverflow(fo, foBox) {
+    let left = 0, right = 0, top = 0, bottom = 0;
+    let sample = '';
+    const nodes = fo.querySelectorAll('*');
+    for (let n = 0; n < nodes.length; n++) {
+      const el = nodes[n];
+      const sw = el.scrollWidth || 0;
+      const sh = el.scrollHeight || 0;
+      const cw = el.clientWidth || 0;
+      const ch = el.clientHeight || 0;
+      if (!sample && (el.textContent || '').trim()) sample = el.textContent;
+      let style = null;
+      if (cw > 0 && sw > cw + 1) {
+        const extra = sw - cw;
+        style = getComputedStyle(el);
+        const align = ((style.textAlign || '') + ' ' + (style.justifyContent || '')).toLowerCase();
+        if (align.indexOf('center') !== -1) {
+          left = Math.max(left, extra / 2);
+          right = Math.max(right, extra / 2);
+        } else if (align.indexOf('right') !== -1 || align.indexOf('end') !== -1
+                   || align.indexOf('flex-end') !== -1) {
+          left = Math.max(left, extra);
+        } else {
+          right = Math.max(right, extra);
+        }
+      }
+      if (ch > 0 && sh > ch + 1) {
+        const extra = sh - ch;
+        if (!style) style = getComputedStyle(el);
+        const ai = (style.alignItems || '').toLowerCase();
+        if (ai === 'center') {
+          top = Math.max(top, extra / 2);
+          bottom = Math.max(bottom, extra / 2);
+        } else if (ai === 'flex-end' || ai === 'end') {
+          top = Math.max(top, extra);
+        } else {
+          bottom = Math.max(bottom, extra);
+        }
+      }
+    }
+    return { left: left, right: right, top: top, bottom: bottom, text: sample };
+  }
+
+  function clipDirs(over) {
+    const dirs = [];
+    if (over.left > 0.5) dirs.push('left');
+    if (over.right > 0.5) dirs.push('right');
+    if (over.top > 0.5) dirs.push('top');
+    if (over.bottom > 0.5) dirs.push('bottom');
+    return dirs.join('+');
+  }
+
+  // Phase 1: text -> parent rect overflow.
+  for (const txt of svg.querySelectorAll('text')) {
+    if (skipEl(txt)) continue;
+    const bbox = getUserBox(txt);
+    if (!bbox) continue;
+    reportBox(_clip(txt.textContent), bbox, pickParent(getAnchor(txt), bbox), null);
+  }
+
+  // Phase 1b: HTML labels inside <foreignObject>. The FO box itself often
+  // sits inside the card while the text is clipped — getBBox cannot see that.
+  const allFo = [...svg.querySelectorAll('foreignObject')];
+  for (let fi = 0; fi < allFo.length; fi++) {
+    const fo = allFo[fi];
+    if (skipEl(fo)) continue;
+    const foBox = getUserBox(fo);
+    if (!foBox) continue;
+    const over = htmlOverflow(fo, foBox);
+    const clipped = over.left > 0.5 || over.right > 0.5
+      || over.top > 0.5 || over.bottom > 0.5;
+    const bbox = {
+      x: foBox.x - over.left,
+      y: foBox.y - over.top,
+      w: foBox.w + over.left + over.right,
+      h: foBox.h + over.top + over.bottom
+    };
+    const transformed = !!(fo.getAttribute('transform')
+      || (fo.closest('[transform]') !== null));
+    const foreign = {
+      domIndex: fi,
+      transformed: transformed,
+      attrs: {
+        x: fo.getAttribute('x') || '0',
+        y: fo.getAttribute('y') || '0',
+        width: fo.getAttribute('width') || '0',
+        height: fo.getAttribute('height') || '0'
+      },
+      expand_w: (!transformed && over.right > 0.5)
+        ? Math.round(over.right + cfg.fixPad) : 0,
+      expand_h: (!transformed && over.bottom > 0.5)
+        ? Math.round(over.bottom + cfg.fixPad) : 0
+    };
+    reportBox(
+      _clip(over.text || fo.textContent),
+      bbox,
+      pickParent(getAnchor(fo), foBox),
+      { foreign: foreign, clipped: clipped, clipDirection: clipDirs(over) }
+    );
   }
 
   // Phase 2: rect -> viewBox overflow.
@@ -222,10 +446,10 @@ JS_DETECT = r"""
   for (const box of boxes) {
     const rx = box.svg.x;
     const ry = box.svg.y;
-    const oL = rx < -vpad;
-    const oR = rx + box.svg.w > svgW + vpad;
-    const oT = ry < -vpad;
-    const oB = ry + box.svg.h > svgH + vpad;
+    const oL = rx < vbX - vpad;
+    const oR = rx + box.svg.w > vbR + vpad;
+    const oT = ry < vbY - vpad;
+    const oB = ry + box.svg.h > vbB + vpad;
 
     if (oL || oR || oT || oB) {
       const dirs = [];
@@ -242,8 +466,8 @@ JS_DETECT = r"""
         parent: { viewBox: svgW + 'x' + svgH },
         fix: {
           // Only right/bottom overflow is canvas-fixable.
-          expand_viewbox_w: oR ? Math.round(rx + box.svg.w - svgW + cfg.vboxFixPad) : 0,
-          expand_viewbox_h: oB ? Math.round(ry + box.svg.h - svgH + cfg.vboxFixPad) : 0
+          expand_viewbox_w: oR ? Math.round(rx + box.svg.w - vbR + cfg.vboxFixPad) : 0,
+          expand_viewbox_h: oB ? Math.round(ry + box.svg.h - vbB + cfg.vboxFixPad) : 0
         }
       });
     }
@@ -271,6 +495,7 @@ JS_DETECT = r"""
   var inkArea = 0;
   var found = false;
   for (var d = 0; d < drawable.length; d++) {
+    if (skipEl(drawable[d])) continue;
     var db = getUserBox(drawable[d]);
     if (!db) continue;
     // Skip near-full-canvas rects: a background fill spanning the viewBox must
@@ -293,10 +518,11 @@ JS_DETECT = r"""
     var coverage = inkArea / (svgW * svgH);
     var cx = minX + cw / 2, cy = minY + ch / 2;
     // Normalized distance of the content centroid from the viewBox center: 0
-    // means dead-center, ~1 means flush against an edge.
+    // means dead-center, ~1 means flush against an edge. The center is
+    // (vbX + svgW/2, vbY + svgH/2), not (svgW/2, svgH/2).
     var offset = Math.max(
-      Math.abs(cx - svgW / 2) / (svgW / 2),
-      Math.abs(cy - svgH / 2) / (svgH / 2)
+      Math.abs(cx - (vbX + svgW / 2)) / (svgW / 2),
+      Math.abs(cy - (vbY + svgH / 2)) / (svgH / 2)
     );
 
     if (coverage < cfg.coverageThreshold
@@ -305,10 +531,10 @@ JS_DETECT = r"""
       // so the fixer doesn't shave off strokes at the very edge. Named cropPad
       // (not pad) to avoid clashing with the Phase 1 const of the same name.
       var cropPad = cfg.cropPad;
-      var cx0 = Math.max(0, Math.round(minX - cropPad));
-      var cy0 = Math.max(0, Math.round(minY - cropPad));
-      var cw0 = Math.min(Math.round(svgW - cx0), Math.round(cw + 2 * cropPad));
-      var ch0 = Math.min(Math.round(svgH - cy0), Math.round(ch + 2 * cropPad));
+      var cx0 = Math.max(vbX, Math.round(minX - cropPad));
+      var cy0 = Math.max(vbY, Math.round(minY - cropPad));
+      var cw0 = Math.min(Math.round(vbR - cx0), Math.round(cw + 2 * cropPad));
+      var ch0 = Math.min(Math.round(vbB - cy0), Math.round(ch + 2 * cropPad));
       results.push({
         type: 'content_misfit',
         text: 'content ' + Math.round(cw) + 'x' + Math.round(ch)
@@ -338,14 +564,17 @@ JS_DETECT = r"""
              w: Math.round(o.w), h: Math.round(o.h) };
   }
 
-  return { issues: results, viewBox: { w: Math.round(svgW), h: Math.round(svgH) } };
+  return { issues: results, viewBox: {
+    x: Math.round(vbX), y: Math.round(vbY),
+    w: Math.round(svgW), h: Math.round(svgH)
+  } };
 }
 """
 
 
 @dataclass
 class Issue:
-    type: str  # 'text_rect' | 'rect_viewbox' | 'text_viewbox' | 'content_misfit'
+    type: str  # text_rect | rect_viewbox | text_viewbox | text_foreign | content_misfit
     text: str
     direction: str  # e.g. 'right+bottom' or 'viewbox+bottom'
     svg: dict  # {x, y, w, h} in SVG coordinate space
@@ -392,7 +621,7 @@ class DetectionConfig:
 
     # Tolerance when deciding whether text overflows its parent rect.
     pad: float = 3.0
-    # Tolerance for orphan text spilling the viewBox edge.
+    # How far orphan text may spill past the viewBox edge before it counts.
     edge_pad: float = 4.0
     # Tolerance for a rect itself overflowing the viewBox.
     vpad: float = 2.0
@@ -518,28 +747,122 @@ class BrowserRunner:
         self._pw = None
 
 
-def check_directory(
-    svg_dir: Path | str,
+def _ignore_patterns(directory: Path) -> list[str]:
+    """Glob patterns from ``directory/.svgguardignore`` (``#`` comments skipped)."""
+    ignore = directory / ".svgguardignore"
+    if not ignore.is_file():
+        return []
+    try:
+        lines = ignore.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    patterns: list[str] = []
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        patterns.append(line.replace("\\", "/"))
+    return patterns
+
+
+def _is_ignored(path: Path, root: Path, patterns: list[str]) -> bool:
+    if not patterns:
+        return False
+    try:
+        rel = path.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:
+        rel = path.name
+    for pat in patterns:
+        if fnmatch.fnmatch(rel, pat) or fnmatch.fnmatch(path.name, pat):
+            return True
+        base = pat.rstrip("/")
+        if rel == base or rel.startswith(base + "/"):
+            return True
+    return False
+
+
+def collect_svgs(
+    paths: list[Path | str],
     *,
+    recursive: bool = False,
+) -> list[tuple[Path, str]]:
+    """Return ``(absolute path, report key)`` for every SVG under ``paths``.
+
+    Each path is one ``.svg`` file or a directory. A directory contributes
+    the ``.svg`` files directly inside it, or the whole tree when
+    ``recursive`` is set. ``.svgguardignore`` in a scanned directory lists
+    glob patterns and directory names to skip. The report key is the path
+    relative to that directory, so two files that share a name stay distinct.
+
+    Raises ``FileNotFoundError`` when a path is missing or nothing matches.
+    """
+    if not paths:
+        raise FileNotFoundError("No SVG path given")
+
+    found: list[tuple[Path, str]] = []
+    seen: set[Path] = set()
+    used_keys: set[str] = set()
+
+    def _add(path: Path, root: Path) -> None:
+        resolved = path.resolve()
+        if resolved in seen:
+            return
+        seen.add(resolved)
+        try:
+            rel = resolved.relative_to(root.resolve()).as_posix()
+        except ValueError:
+            rel = path.name
+        key = rel or path.name
+        if key in used_keys:
+            key = resolved.as_posix()
+        used_keys.add(key)
+        found.append((resolved, key))
+
+    for raw in paths:
+        target = Path(raw)
+        if target.is_file():
+            if target.suffix.lower() != ".svg":
+                raise FileNotFoundError(f"Not an SVG file: {target}")
+            root = target.parent
+            if not _is_ignored(target, root, _ignore_patterns(root)):
+                _add(target, root)
+            continue
+        if not target.is_dir():
+            raise FileNotFoundError(f"Directory not found: {target}")
+        patterns = _ignore_patterns(target)
+        iterator = target.rglob("*") if recursive else target.iterdir()
+        batch = [
+            entry
+            for entry in iterator
+            if entry.is_file()
+            and entry.suffix.lower() == ".svg"
+            and not _is_ignored(entry, target, patterns)
+        ]
+        for entry in sorted(batch, key=lambda item: item.as_posix().lower()):
+            _add(entry, target)
+
+    if not found:
+        where = ", ".join(str(p) for p in paths)
+        raise FileNotFoundError(f"No SVG files found in {where}")
+    return found
+
+
+def check_paths(
+    paths: list[Path | str],
+    *,
+    recursive: bool = False,
     verbose: bool = False,
     json_out: Path | str | None = None,
     config: DetectionConfig | None = None,
     runner: BrowserRunner | None = None,
 ) -> tuple[dict[str, CheckResult], int]:
-    """Check all SVGs in a directory. Returns (results, total_issues).
+    """Check every SVG under ``paths``. Returns ``(results, total_issues)``.
 
-    Pass ``runner=`` to reuse an already-launched browser across calls
-    (avoids Chromium's ~1s startup per invocation). When omitted, a
-    short-lived runner is created for this call only.
+    ``results`` is keyed by the relative path ``collect_svgs`` chose.
+    Pass ``runner=`` to reuse an already-launched browser.
     """
     cfg = config or (runner.config if runner else DetectionConfig())
-    svg_dir = Path(svg_dir).resolve()
-    if not svg_dir.is_dir():
-        raise FileNotFoundError(f"Directory not found: {svg_dir}")
-
-    svg_files = sorted(svg_dir.glob("*.svg"))
-    if not svg_files:
-        raise FileNotFoundError(f"No SVG files found in {svg_dir}")
+    svg_files = collect_svgs(paths, recursive=recursive)
 
     logger.info("Checking %d SVG files...", len(svg_files))
 
@@ -549,26 +872,26 @@ def check_directory(
 
     def _run(page) -> None:
         nonlocal total_issues, total_errors
-        for svg_path in svg_files:
+        for svg_path, key in svg_files:
             try:
                 result = check_svg(page, svg_path, config=cfg)
             except Exception as e:
                 # Record the failure ON the result so callers (CLI, JSON report)
                 # can tell a broken file from a clean one. ok becomes False.
-                logger.warning("  [ERR] %s: %s", svg_path.name, e)
-                results[svg_path.name] = CheckResult(
+                logger.warning("  [ERR] %s: %s", key, e)
+                results[key] = CheckResult(
                     path=svg_path, issues=[], viewBox=None, error=str(e)
                 )
                 total_errors += 1
                 continue
 
-            results[svg_path.name] = result
+            results[key] = result
             if result.error is not None:
                 # check_svg returned a render error (e.g. no parseable <svg>
                 # root) rather than raising. Surface it exactly like the
                 # exception path above so the CLI/CI log shows [ERR] and the
                 # file is never mistaken for a clean pass.
-                logger.warning("  [ERR] %s: %s", svg_path.name, result.error)
+                logger.warning("  [ERR] %s: %s", key, result.error)
                 total_errors += 1
                 continue
             if not result.ok:
@@ -577,11 +900,11 @@ def check_directory(
                     text_preview = issue.text[:40]
                     logger.info(
                         '  [!!] %s: "%s" overflows %s',
-                        svg_path.name,
+                        key,
                         text_preview,
                         issue.direction,
                     )
-                    if verbose and issue.type == "text_rect":
+                    if verbose and issue.type in ("text_rect", "text_foreign"):
                         par = issue.parent
                         logger.info(
                             "       rect(%s,%s %sx%s) fix: expand +%sx+%s",
@@ -593,7 +916,7 @@ def check_directory(
                             issue.fix.get("expand_h", 0),
                         )
             elif verbose:
-                logger.info("  [OK] %s", svg_path.name)
+                logger.info("  [OK] %s", key)
 
     if runner is not None:
         _run(runner.page)
@@ -619,3 +942,29 @@ def check_directory(
         logger.info("Report saved to %s", Path(json_out))
 
     return results, total_issues
+
+
+def check_directory(
+    svg_dir: Path | str,
+    *,
+    verbose: bool = False,
+    json_out: Path | str | None = None,
+    config: DetectionConfig | None = None,
+    runner: BrowserRunner | None = None,
+    recursive: bool = False,
+) -> tuple[dict[str, CheckResult], int]:
+    """Check a directory of SVGs, or one SVG file. Returns (results, total_issues).
+
+    Pass ``runner=`` to reuse an already-launched browser across calls
+    (avoids Chromium's ~1s startup per invocation). When omitted, a
+    short-lived runner is created for this call only. ``recursive`` walks
+    subdirectories. See ``collect_svgs`` for ``.svgguardignore``.
+    """
+    return check_paths(
+        [svg_dir],
+        recursive=recursive,
+        verbose=verbose,
+        json_out=json_out,
+        config=config,
+        runner=runner,
+    )

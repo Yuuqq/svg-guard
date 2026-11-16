@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 220" width="500" height="220">
+  <!-- Full-canvas plate drawn first. The label's bbox center falls outside
+       the small card and inside this plate, so "first containing rect" and
+       "center point" both miss the card. The text anchor is inside the card. -->
+  <rect x="0" y="0" width="500" height="220" fill="#ffffff"/>
+  <rect x="40" y="50" width="120" height="56" fill="#fee2e2" rx="6"/>
+  <text x="50" y="84" font-family="sans-serif" font-size="18" fill="#111">this label starts in the card but runs far past it</text>
+</svg>

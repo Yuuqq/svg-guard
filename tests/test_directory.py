@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from svg_guard.checker import check_directory
+from svg_guard.checker import check_directory, collect_svgs
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -37,6 +37,38 @@ class TestCheckDirectoryPureLogic:
         # Directory exists but has no .svg files.
         with pytest.raises(FileNotFoundError):
             check_directory(tmp_path)
+
+    def test_collect_single_file(self, tmp_path):
+        svg = tmp_path / "a.svg"
+        svg.write_text("<svg/>", encoding="utf-8")
+        found = collect_svgs([svg])
+        assert [key for _, key in found] == ["a.svg"]
+
+    def test_collect_rejects_non_svg(self, tmp_path):
+        txt = tmp_path / "notes.txt"
+        txt.write_text("nope", encoding="utf-8")
+        with pytest.raises(FileNotFoundError):
+            collect_svgs([txt])
+
+    def test_collect_recursive_and_ignore(self, tmp_path):
+        (tmp_path / "top.svg").write_text("<svg/>", encoding="utf-8")
+        nested = tmp_path / "sub"
+        nested.mkdir()
+        (nested / "inner.svg").write_text("<svg/>", encoding="utf-8")
+        skipped = tmp_path / "skip"
+        skipped.mkdir()
+        (skipped / "hidden.svg").write_text("<svg/>", encoding="utf-8")
+        (tmp_path / ".svgguardignore").write_text(
+            "# generated\nskip/\n", encoding="utf-8"
+        )
+
+        flat = [key for _, key in collect_svgs([tmp_path])]
+        assert flat == ["top.svg"]
+
+        deep = [key for _, key in collect_svgs([tmp_path], recursive=True)]
+        assert "top.svg" in deep
+        assert "sub/inner.svg" in deep
+        assert all("hidden.svg" not in key for key in deep)
 
 
 class TestBrowserRunnerContract:

@@ -161,6 +161,81 @@ def fix_svg(
         if change:
             changes.append(change)
 
+    # HTML labels clipped by a <foreignObject> (draw.io and similar). Growing
+    # the parent card does not unclip the HTML; the foreignObject's own
+    # width/height has to grow too. Group by element so two labels in one
+    # box take the larger delta.
+    fo_grouped: dict[tuple, dict] = {}
+    fo_order: list[tuple] = []
+    for issue in issues:
+        foreign = issue.fix.get("foreign") if isinstance(issue.fix, dict) else None
+        if not isinstance(foreign, dict):
+            if issue.type == "text_foreign":
+                changes.append(
+                    f'text "{(issue.text or "").strip()[:40]}" skipped: '
+                    f"foreignObject overflow needs a manual edit"
+                )
+            continue
+        ew = foreign.get("expand_w", 0) or 0
+        eh = foreign.get("expand_h", 0) or 0
+        if ew <= 0 and eh <= 0:
+            # A text_rect that also mentions the foreignObject already logged
+            # its own skip. Only text_foreign has nothing else to say.
+            if issue.type != "text_foreign":
+                continue
+            if foreign.get("transformed") or issue.fix.get("transformed"):
+                changes.append(
+                    f'text "{(issue.text or "").strip()[:40]}" skipped: '
+                    f"foreignObject is transformed; edit width/height manually"
+                )
+            else:
+                changes.append(
+                    f'text "{(issue.text or "").strip()[:40]}" skipped: '
+                    f"left/top overflow needs manual repositioning"
+                )
+            continue
+        attrs = foreign.get("attrs") or {}
+        dom_index = foreign.get("domIndex")
+        key = (
+            dom_index
+            if dom_index is not None
+            else (attrs.get("x", ""), attrs.get("y", ""))
+        )
+        slot = fo_grouped.setdefault(
+            key,
+            {
+                "expand_w": 0.0,
+                "expand_h": 0.0,
+                "attrs": attrs,
+                "dom_index": dom_index,
+            },
+        )
+        if key not in fo_order:
+            fo_order.append(key)
+        slot["expand_w"] = max(slot["expand_w"], ew)
+        slot["expand_h"] = max(slot["expand_h"], eh)
+
+    for key in fo_order:
+        slot = fo_grouped[key]
+        content, change = _fix_card(
+            content,
+            slot["attrs"],
+            slot["expand_w"],
+            slot["expand_h"],
+            dom_index=slot["dom_index"],
+            tag="foreignObject",
+        )
+        if change and "skipped" not in change:
+            content = _sync_inner_label_px(
+                content,
+                slot["dom_index"],
+                slot["attrs"],
+                slot["expand_w"],
+                slot["expand_h"],
+            )
+        if change:
+            changes.append(change)
+
     if changes and not dry_run:
         write_text_atomic(svg_path, content)
 
@@ -409,6 +484,61 @@ def _dim_msg(axis: str, delta: float, mode: str) -> str:
     return f"{axis} (skipped)"
 
 
+def _sync_inner_label_px(
+    content: str,
+    dom_index: int | None,
+    attrs: dict,
+    expand_w: float,
+    expand_h: float,
+) -> str:
+    """Grow fixed CSS px sizes inside one ``<foreignObject>``.
+
+    draw.io (and similar) size the HTML label with ``width:120px`` copied
+    from the foreignObject. Widening only the foreignObject leaves that CSS
+    clipping the text. Values within 1.5px of the old foreignObject size are
+    updated; other lengths are left alone.
+    """
+    if dom_index is None:
+        return content
+    blocks = list(
+        re.finditer(r"<foreignObject\b[^>]*>.*?</foreignObject>", content, re.DOTALL)
+    )
+    if dom_index < 0 or dom_index >= len(blocks):
+        return content
+    block = blocks[dom_index]
+    old_w = _parse_len(str(attrs.get("width", "")))
+    old_h = _parse_len(str(attrs.get("height", "")))
+
+    def _bump(text: str, prop: str, old: float | None, delta: float) -> str:
+        if old is None or delta <= 0:
+            return text
+        new = old + delta
+
+        def repl(m: "re.Match[str]") -> str:
+            try:
+                val = float(m.group(1))
+            except ValueError:
+                return m.group(0)
+            if abs(val - old) > 1.5:
+                return m.group(0)
+            return f"{prop}:{new:.0f}px"
+
+        return re.sub(
+            rf"{prop}\s*:\s*([0-9.]+)\s*px",
+            repl,
+            text,
+            flags=re.IGNORECASE,
+        )
+
+    # max-width before width: the shorter pattern also matches the longer name.
+    inner = block.group(0)
+    inner = _bump(inner, "max-width", old_w, expand_w)
+    inner = _bump(inner, "width", old_w, expand_w)
+    inner = _bump(inner, "max-height", old_h, expand_h)
+    inner = _bump(inner, "height", old_h, expand_h)
+    return content[: block.start()] + inner + content[block.end() :]
+
+
 def _fix_card(
     content: str,
     attrs: dict,
@@ -416,6 +546,7 @@ def _fix_card(
     expand_h: float,
     *,
     dom_index: int | None = None,
+    tag: str = "rect",
 ) -> tuple[str, str | None]:
     """Expand the rect identified by ``attrs`` (x/y/width/height).
 
@@ -486,7 +617,7 @@ def _fix_card(
 
     # Match a <rect …> open tag (covers both self-closing and open-close forms,
     # since width/height always live on the open tag).
-    for rect_n, m in enumerate(re.finditer(r"<rect\b[^>]*>", content)):
+    for rect_n, m in enumerate(re.finditer(rf"<{tag}\b[^>]*>", content)):
         tag = m.group()
 
         # When we have a dom_index, locate the rect by position (matching the
@@ -539,9 +670,9 @@ def _fix_card(
 
         new_content = content[: m.start()] + new_tag + content[m.end() :]
         label = (
-            f"rect[{dom_index}]"
+            f"{tag}[{dom_index}]"
             if dom_index is not None
-            else f"rect({target_x},{target_y})"
+            else f"{tag}({target_x},{target_y})"
         )
         return new_content, f"{label} {' '.join(parts)}"
 

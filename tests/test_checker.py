@@ -172,6 +172,67 @@ class TestCheckSvg:
         assert issue.fix.get("expand_w", 0) == 0
         assert issue.fix.get("expand_h", 0) == 0
 
+    def test_background_rect_does_not_hide_card_overflow(self, page):
+        # A full-canvas plate is drawn first, and the label is wider than its
+        # card, so the bbox center falls outside the card and inside the
+        # plate. Matching the first container (or the center) reports nothing.
+        # The anchor sits in the card, and the tightest container must win.
+        result = check_svg(page, FIXTURES / "bg_card_overflow.svg")
+        text_rects = [i for i in result.issues if i.type == "text_rect"]
+        assert text_rects, (
+            "card overflow behind a background rect was missed: "
+            f"{[(i.type, i.direction, i.text) for i in result.issues]}"
+        )
+        assert text_rects[0].parent["svg"]["w"] < 200
+        assert text_rects[0].fix.get("fixable") is True
+
+    def test_nested_card_not_matched_to_outer_frame(self, page):
+        result = check_svg(page, FIXTURES / "nested_card_overflow.svg")
+        text_rects = [i for i in result.issues if i.type == "text_rect"]
+        assert text_rects, (
+            f"inner card overflow missed: {[(i.type, i.text) for i in result.issues]}"
+        )
+        assert text_rects[0].parent["svg"]["w"] < 150
+
+    def test_shifted_viewbox_inside_rect_is_clean(self, page):
+        # viewBox="100 50 200 100": a rect at x=120 is inside the visible
+        # area. Comparing against [0, width] reports it as past the right edge.
+        result = check_svg(page, FIXTURES / "shifted_viewbox_clean.svg")
+        assert result.ok, (
+            f"rect inside a shifted viewBox was flagged: "
+            f"{[(i.type, i.direction) for i in result.issues]}"
+        )
+
+    def test_shifted_viewbox_outside_rect_is_flagged(self, page):
+        # viewBox starts at -40. A rect ending at x=180 is past the visible
+        # right edge (160) but still inside [0, width], so the old check
+        # stayed silent.
+        result = check_svg(page, FIXTURES / "shifted_viewbox_overflow.svg")
+        assert any(
+            i.type == "rect_viewbox" and "right" in i.direction for i in result.issues
+        ), (
+            f"expected rect_viewbox right, got {[(i.type, i.direction) for i in result.issues]}"
+        )
+
+    def test_defs_content_is_not_reported(self, page):
+        result = check_svg(page, FIXTURES / "defs_hidden.svg")
+        assert result.error is None
+        leaked = [i for i in result.issues if "unused" in (i.text or "")]
+        assert not leaked, f"hidden defs text was reported: {leaked}"
+
+    def test_foreign_object_clip_detected(self, page):
+        result = check_svg(page, FIXTURES / "foreign_overflow.svg")
+        hits = [
+            i
+            for i in result.issues
+            if i.type in ("text_foreign", "text_rect")
+            and (i.fix.get("foreign") or {}).get("expand_w", 0) > 0
+        ]
+        assert hits, (
+            "HTML clipped by foreignObject was not detected: "
+            f"{[(i.type, i.direction, i.fix) for i in result.issues]}"
+        )
+
 
 class TestDetectionConfig:
     def test_as_js_round_trips_all_thresholds(self):

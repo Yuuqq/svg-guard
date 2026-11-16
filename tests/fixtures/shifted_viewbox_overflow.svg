@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-40 -20 200 100" width="200" height="100">
+  <!-- Visible range ends at x=160. The rect ends at x=180, which is still
+       inside the numeric range [0, width] and so used to look fine. -->
+  <rect x="10" y="10" width="170" height="40" fill="#fee2e2"/>
+</svg>

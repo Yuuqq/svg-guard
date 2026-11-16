@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 100" width="220" height="100">
+  <defs>
+    <text id="unused" x="0" y="20" font-size="20" font-family="sans-serif">this unused label is far wider than the canvas and must not be reported</text>
+  </defs>
+  <rect x="20" y="25" width="180" height="50" fill="#e5e7eb"/>
+  <text x="40" y="55" font-size="16" font-family="sans-serif" fill="#111">visible label</text>
+</svg>

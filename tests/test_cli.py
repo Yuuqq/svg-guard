@@ -145,3 +145,43 @@ class TestExitCodeContract:
         assert r.returncode == 0, r.stderr
         assert out_html.exists()
         assert "SVG Guard Report" in out_html.read_text(encoding="utf-8")
+
+    def test_check_single_file(self, tmp_path):
+        bad = self._copy_fixture_into("text_overflow.svg", tmp_path)
+        r = self._run_cli("check", str(bad))
+        assert r.returncode == 1, r.stdout + r.stderr
+
+    def test_recursive_finds_nested_svg(self, tmp_path):
+        nested = tmp_path / "diagrams" / "arch"
+        nested.mkdir(parents=True)
+        src = Path(__file__).parent / "fixtures" / "text_overflow.svg"
+        (nested / "bad.svg").write_text(
+            src.read_text(encoding="utf-8"), encoding="utf-8"
+        )
+        shallow = self._run_cli("check", "--dir", str(tmp_path))
+        assert shallow.returncode == 2, shallow.stderr
+        deep = self._run_cli("check", "--dir", str(tmp_path), "--recursive")
+        assert deep.returncode == 1, deep.stdout + deep.stderr
+
+    def test_ignore_file_skips_overflow(self, tmp_path):
+        self._copy_fixture_into("text_overflow.svg", tmp_path)
+        self._copy_fixture_into("good.svg", tmp_path)
+        (tmp_path / ".svgguardignore").write_text(
+            "text_overflow.svg\n", encoding="utf-8"
+        )
+        r = self._run_cli("check", "--dir", str(tmp_path))
+        assert r.returncode == 0, r.stdout + r.stderr
+
+    def test_fix_then_recheck_exits_clean(self, tmp_path):
+        self._copy_fixture_into("text_overflow.svg", tmp_path)
+        fixed = self._run_cli("fix", "--dir", str(tmp_path), "--no-backup")
+        assert fixed.returncode == 0, fixed.stdout + fixed.stderr
+        again = self._run_cli("check", "--dir", str(tmp_path))
+        assert again.returncode == 0, again.stdout + again.stderr
+
+    def test_report_exits_nonzero_when_issues_remain(self, tmp_path):
+        self._copy_fixture_into("text_overflow.svg", tmp_path)
+        out_html = tmp_path / "report.html"
+        r = self._run_cli("report", "--dir", str(tmp_path), "--output", str(out_html))
+        assert r.returncode == 1, r.stdout + r.stderr
+        assert out_html.exists()

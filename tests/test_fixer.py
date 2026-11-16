@@ -163,6 +163,32 @@ class TestFixTransformedRect:
         assert svg_path.read_text(encoding="utf-8") == original
 
 
+class TestFixForeignObject:
+    def test_clipped_html_widens_foreign_object(self, page, tmp_path):
+        svg_path = _copy_fixture("foreign_overflow.svg", tmp_path)
+        result = check_svg(page, svg_path)
+        hits = [
+            i
+            for i in result.issues
+            if (i.fix.get("foreign") or {}).get("expand_w", 0) > 0
+        ]
+        assert hits, f"expected a foreignObject expand, got {result.issues}"
+
+        changes = fix_svg(svg_path, result.issues, backup=False)
+        assert any("foreignObject" in c and "width" in c for c in changes), changes
+        modified = svg_path.read_text(encoding="utf-8")
+        assert 'width="120"' not in modified
+
+        result2 = check_svg(page, svg_path)
+        still = [
+            i
+            for i in result2.issues
+            if i.type in ("text_foreign", "text_rect")
+            and (i.fix.get("foreign") or {}).get("expand_w", 0) > 0
+        ]
+        assert not still, f"HTML still clipped after fix: {result2.issues}"
+
+
 class TestFixBackup:
     def test_backup_created_by_default(self, page, tmp_path):
         svg_path = _copy_fixture("text_overflow.svg", tmp_path)

@@ -219,6 +219,60 @@ class TestFixCardUnits:
         assert msg is not None
         assert "skipped" in msg and 'width="100%"' in msg
 
+    def test_expands_foreign_object_by_dom_index(self):
+        # draw.io labels live in <foreignObject>. Widening the card is not
+        # enough — the foreignObject itself has to grow or the HTML stays
+        # clipped. dom index must skip a preceding <rect>.
+        attrs = {"x": "40", "y": "55", "width": "120", "height": "36"}
+        content = (
+            "<svg>"
+            '<rect x="30" y="40" width="200" height="80"/>'
+            '<foreignObject x="40" y="55" width="120" height="36"></foreignObject>'
+            "</svg>"
+        )
+        new_content, msg = _fix_card(
+            content, attrs, 48, 0, dom_index=0, tag="foreignObject"
+        )
+        assert msg is not None and "skipped" not in msg
+        assert 'width="168"' in new_content
+        assert 'width="200"' in new_content  # the rect is untouched
+
+    def test_foreign_object_css_px_tracks_the_box(self, tmp_path):
+        # draw.io copies the foreignObject size into width:Npx / max-width:Npx.
+        # Growing only the attribute leaves that CSS clipping the label.
+        svg = tmp_path / "label.svg"
+        svg.write_text(
+            '<svg viewBox="0 0 400 200" width="400" height="200">'
+            '<foreignObject x="40" y="55" width="120" height="36">'
+            '<div style="width:120px;max-width:120px;height:36px;">hi</div>'
+            '<div style="width:10px;">icon</div>'
+            "</foreignObject></svg>",
+            encoding="utf-8",
+        )
+        issue = Issue(
+            type="text_foreign",
+            text="hi",
+            direction="right",
+            svg={"x": 40, "y": 55, "w": 200, "h": 36},
+            parent={},
+            fix={
+                "fixable": True,
+                "foreign": {
+                    "domIndex": 0,
+                    "attrs": {"x": "40", "y": "55", "width": "120", "height": "36"},
+                    "expand_w": 80,
+                    "expand_h": 0,
+                },
+            },
+        )
+        fix_svg(svg, [issue], backup=False)
+        text = svg.read_text(encoding="utf-8")
+        assert 'width="200"' in text
+        assert "width:200px" in text
+        assert "max-width:200px" in text
+        assert "height:36px" in text  # no vertical growth
+        assert "width:10px" in text  # a different length stays
+
     def test_fixes_open_close_rect(self):
         # B2: <rect …></rect> (non-self-closing) must now be fixed.
         attrs = {"x": "10", "y": "10", "width": "150", "height": "40"}

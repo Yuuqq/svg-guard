@@ -2,9 +2,9 @@
 
 Exit code contract (shared by all subcommands):
 
-  * ``0`` — success, no overflow issues (and no render errors)
-  * ``1`` — overflow issues found (check), or fixes still needed (fix)
-  * ``2`` — tool-level error: missing directory, Playwright not installed,
+  * ``0`` — success, no overflow issues left (and no render errors)
+  * ``1`` — overflow issues found (check, report), or still present after fix
+  * ``2`` — tool-level error: missing path, Playwright not installed,
             or one or more SVGs failed to render and could not be checked
 """
 
@@ -40,6 +40,39 @@ def _configure_logging(verbose: bool) -> None:
     logger.propagate = False
 
 
+def _add_scan_args(parser: argparse.ArgumentParser) -> None:
+    """Files or directories a subcommand should measure.
+
+    ``svg-guard check diagram.svg`` and ``svg-guard check --dir diagrams -r``
+    both work. With no path, the current directory is scanned.
+    """
+    parser.add_argument(
+        "paths",
+        nargs="*",
+        help="SVG files or directories (default: the current directory)",
+    )
+    parser.add_argument(
+        "--dir",
+        default=None,
+        help="Directory of SVG files, added to any paths given",
+    )
+    parser.add_argument(
+        "--recursive",
+        "-r",
+        action="store_true",
+        help="Scan subdirectories. A .svgguardignore in each directory skips matches",
+    )
+
+
+def _scan_paths(args: argparse.Namespace) -> list[str]:
+    paths = [str(p) for p in (args.paths or [])]
+    if getattr(args, "dir", None):
+        paths.append(args.dir)
+    if not paths:
+        paths.append(".")
+    return paths
+
+
 def main(argv: list[str] | None = None) -> None:
     from . import __version__
 
@@ -54,14 +87,14 @@ def main(argv: list[str] | None = None) -> None:
 
     # ── check ──────────────────────────────────────────────
     p_check = sub.add_parser("check", help="Detect overflow issues")
-    p_check.add_argument("--dir", default=".", help="Directory containing SVG files")
+    _add_scan_args(p_check)
     p_check.add_argument("--verbose", "-v", action="store_true")
     p_check.add_argument("--json", dest="json_out", help="Write JSON report")
     p_check.add_argument("--html", dest="html_out", help="Write HTML visual report")
 
     # ── fix ────────────────────────────────────────────────
     p_fix = sub.add_parser("fix", help="Auto-fix overflow issues")
-    p_fix.add_argument("--dir", default=".", help="Directory containing SVG files")
+    _add_scan_args(p_fix)
     p_fix.add_argument(
         "--dry-run", action="store_true", help="Show what would change without writing"
     )
@@ -71,7 +104,7 @@ def main(argv: list[str] | None = None) -> None:
 
     # ── report ─────────────────────────────────────────────
     p_report = sub.add_parser("report", help="Generate HTML report only")
-    p_report.add_argument("--dir", default=".", help="Directory containing SVG files")
+    _add_scan_args(p_report)
     p_report.add_argument(
         "--output", "-o", default="svg-guard-report.html", help="Output HTML path"
     )
@@ -102,11 +135,14 @@ def main(argv: list[str] | None = None) -> None:
 
 
 def _cmd_check(args: argparse.Namespace) -> None:
-    from .checker import check_directory
+    from .checker import check_paths
     from .report import generate_report
 
-    results, total_issues = check_directory(
-        args.dir, verbose=args.verbose, json_out=args.json_out
+    results, total_issues = check_paths(
+        _scan_paths(args),
+        recursive=args.recursive,
+        verbose=args.verbose,
+        json_out=args.json_out,
     )
 
     if args.html_out:
@@ -120,45 +156,86 @@ def _cmd_check(args: argparse.Namespace) -> None:
     sys.exit(1 if total_issues > 0 else 0)
 
 
+_MAX_FIX_PASSES = 3
+
+
 def _cmd_fix(args: argparse.Namespace) -> None:
-    from .checker import check_directory
+    from .checker import BrowserRunner, check_paths, check_svg, collect_svgs
     from .fixer import fix_svg
 
-    results, total_issues = check_directory(args.dir)
-    had_render_errors = _has_render_errors(results)
+    targets = _scan_paths(args)
+    # Resolve paths before Chromium starts, so a missing directory is a fast
+    # exit 2 instead of a browser launch followed by the same error.
+    collect_svgs(targets, recursive=args.recursive)
 
     # Separate real modifications from skip notices. fix_svg() reports both in
     # one list of strings; a skip notice always contains the word "skipped".
-    # Counting skips as "fixes" made the summary claim "Applied N fixes" even
-    # when every issue was unfixable and no byte was written — misleading.
     def _is_skip(msg: str) -> bool:
         return "skipped" in msg
 
     total_applied = 0
     total_skipped = 0
-    for name, result in results.items():
-        if result.ok:
-            continue
-        if result.error is not None:
-            # Can't fix a file we failed to measure; surface it but skip writing.
-            print(f"  [skip] {name}: render error, not fixable ({result.error})")
-            total_skipped += 1
-            continue
-        changes = fix_svg(
-            result.path,
-            result.issues,
-            backup=not args.no_backup,
-            dry_run=args.dry_run,
-        )
-        applied = [c for c in changes if not _is_skip(c)]
-        skipped = [c for c in changes if _is_skip(c)]
-        total_applied += len(applied)
-        total_skipped += len(skipped)
-        mode = "would fix" if args.dry_run else "fixed"
-        for change in applied:
-            print(f"  [{mode}] {name}: {change}")
-        for change in skipped:
-            print(f"  [skip] {name}: {change}")
+    mode = "would fix" if args.dry_run else "fixed"
+
+    def _apply(results: dict, only: set[str] | None) -> list[str]:
+        """Fix files that still have issues. Returns keys that were written.
+
+        ``only`` limits a later pass to files the previous pass actually
+        changed, so a render error or an unfixable label is not reported twice.
+        """
+        nonlocal total_applied, total_skipped
+        written: list[str] = []
+        for name, result in results.items():
+            if only is not None and name not in only:
+                continue
+            if result.ok:
+                continue
+            if result.error is not None:
+                if only is None:
+                    print(
+                        f"  [skip] {name}: render error, not fixable ({result.error})"
+                    )
+                    total_skipped += 1
+                continue
+            changes = fix_svg(
+                result.path,
+                result.issues,
+                backup=not args.no_backup,
+                dry_run=args.dry_run,
+            )
+            applied = [c for c in changes if not _is_skip(c)]
+            skipped = [c for c in changes if _is_skip(c)]
+            total_applied += len(applied)
+            if only is None:
+                total_skipped += len(skipped)
+            for change in applied:
+                print(f"  [{mode}] {name}: {change}")
+            if only is None:
+                for change in skipped:
+                    print(f"  [skip] {name}: {change}")
+            if applied and not args.dry_run:
+                written.append(name)
+        return written
+
+    with BrowserRunner() as runner:
+        results, _ = check_paths(targets, recursive=args.recursive, runner=runner)
+        # Re-measure after each write. Widening a card can push it outside
+        # the viewBox, and one pass of rounding can leave a sliver of
+        # overflow. Stop early when a pass changes nothing, or when the
+        # files we just wrote come back clean. Dry-run never writes, so it
+        # does a single pass and keeps the original exit code.
+        pending: set[str] | None = None
+        for _ in range(_MAX_FIX_PASSES):
+            written = _apply(results, pending)
+            if args.dry_run or not written:
+                break
+            for name in written:
+                results[name] = check_svg(
+                    runner.page, results[name].path, config=runner.config
+                )
+            if all(results[name].ok for name in written):
+                break
+            pending = set(written)
 
     if total_applied == 0 and total_skipped == 0:
         print("No fixable issues found.")
@@ -175,26 +252,27 @@ def _cmd_fix(args: argparse.Namespace) -> None:
     if args.dry_run and total_applied > 0:
         print("Run without --dry-run to apply changes.")
 
-    # Exit 2 if any file failed to render (couldn't be processed at all);
-    # otherwise 1 if there were issues to fix, else 0.
-    if had_render_errors:
+    # Exit 2 if any file failed to render. Otherwise 1 when something is
+    # still wrong after fixing (or would still be wrong, on a dry run),
+    # and 0 when the files are clean.
+    if _has_render_errors(results):
         sys.exit(2)
-    sys.exit(1 if total_issues > 0 else 0)
+    still_bad = any(not r.ok and r.error is None for r in results.values())
+    sys.exit(1 if still_bad else 0)
 
 
 def _cmd_report(args: argparse.Namespace) -> None:
-    from .checker import check_directory
+    from .checker import check_paths
     from .report import generate_report
 
-    results, _ = check_directory(args.dir)
+    results, total_issues = check_paths(_scan_paths(args), recursive=args.recursive)
     path = generate_report(results, args.output)
     print(f"Report saved to {path}")
-    # Mirror the other subcommands: always exit through sys.exit so the exit
-    # code contract is uniform whether main() runs as a process or is invoked
-    # in-process by tests.
+    # Same gate as check: a report of a broken tree must not exit 0, or CI
+    # that only runs `report` will go green on overflow.
     if _has_render_errors(results):
         sys.exit(2)
-    sys.exit(0)
+    sys.exit(1 if total_issues > 0 else 0)
 
 
 if __name__ == "__main__":
