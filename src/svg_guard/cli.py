@@ -20,6 +20,23 @@ def _has_render_errors(results: dict) -> bool:
     return any(getattr(r, "error", None) is not None for r in results.values())
 
 
+def _is_skip(msg: str) -> bool:
+    """True when this notice did not change the file.
+
+    A viewBox that actually grew can still mention an attribute left alone
+    (``w (unchanged)``) or, on older messages, ``skipped``. That notice is a
+    write. Only a message whose whole action was a skip counts as one.
+    """
+    lower = msg.lstrip().lower()
+    if lower.startswith("viewbox expanded") and ("+" in msg or "injected" in lower):
+        return False
+    if lower.startswith("viewbox cropped to") or lower.startswith(
+        "viewbox extended after crop"
+    ):
+        return False
+    return "skipped" in lower
+
+
 def _configure_logging(verbose: bool) -> None:
     """Attach a handler to the svg_guard logger so the CLI reproduces the
     progress output that used to come from bare ``print`` calls.
@@ -168,11 +185,7 @@ def _cmd_fix(args: argparse.Namespace) -> None:
     # exit 2 instead of a browser launch followed by the same error.
     collect_svgs(targets, recursive=args.recursive)
 
-    # Separate real modifications from skip notices. fix_svg() reports both in
-    # one list of strings; a skip notice always contains the word "skipped".
-    def _is_skip(msg: str) -> bool:
-        return "skipped" in msg
-
+    # Real modifications versus skip notices. See ``_is_skip``.
     total_applied = 0
     total_skipped = 0
     mode = "would fix" if args.dry_run else "fixed"

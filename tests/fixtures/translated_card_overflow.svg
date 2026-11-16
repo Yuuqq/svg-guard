@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 200" width="400" height="200">
+  <!-- A pure translate (the wrapper draw.io adds for crisp strokes) must
+       stay fixable: width still grows 1:1 in user space. -->
+  <g transform="translate(20,10)">
+    <rect x="40" y="40" width="100" height="50" fill="#fee2e2"/>
+    <text x="48" y="72" font-family="sans-serif" font-size="16" fill="#111">label that runs well past this translated card</text>
+  </g>
+</svg>

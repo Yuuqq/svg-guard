@@ -26,6 +26,20 @@ def _run(argv: list[str]):
     return excinfo.value.code
 
 
+class TestSkipClassification:
+    def test_successful_expand_with_unchanged_attr_is_a_write(self):
+        assert cli_mod._is_skip("viewBox expanded (+30h, w (unchanged))") is False
+
+    def test_successful_expand_that_mentions_skipped_is_still_a_write(self):
+        notice = "viewBox expanded (+30h, w (skipped)); skipped nothing else"
+        assert cli_mod._is_skip(notice) is False
+
+    def test_pure_skip_stays_a_skip(self):
+        assert cli_mod._is_skip(
+            'text "title" skipped: left/top overflow needs manual repositioning'
+        )
+
+
 class TestVersionAndUsage:
     def test_version_flag_prints_version_and_exits_zero(self, capsys):
         code = _run(["--version"])

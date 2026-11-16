@@ -142,6 +142,19 @@ class TestExpandViewbox:
         assert "skipped" in msg
 
 
+class TestExpandViewboxNotice:
+    def test_percentage_width_note_does_not_read_as_a_skip(self):
+        # The viewBox did grow. The percentage width was left alone. The
+        # notice must not contain "skipped", or the CLI treats the write as
+        # a no-op and skips the recheck.
+        src = '<svg viewBox="0 0 400 200" width="100%" height="200"/>'
+        out, msg = _expand_viewbox(src, 40, 0)
+        assert msg is not None
+        assert 'viewBox="0 0 440 200"' in out
+        assert "unchanged" in msg
+        assert "skipped" not in msg
+
+
 class TestCropViewbox:
     # content_misfit fix: the viewBox is set to an absolute crop rectangle (the
     # inverse of _expand_viewbox's delta growth). Mirrors TestExpandViewbox's
@@ -696,6 +709,59 @@ class TestFixSvgBehaviour:
         assert 'rect x="10" y="10" width="180"' in modified
         # rect_viewbox widened the viewBox from 500 to 620.
         assert 'viewBox="0 0 620 300"' in modified
+
+    def test_viewbox_deltas_use_the_larger_edge(self, tmp_path):
+        # Two cards past the same edge: the canvas grows by the larger
+        # delta, not the sum (10 + 30 would become 140).
+        svg = '<svg viewBox="0 0 100 80" width="100" height="80"/>'
+        svg_path = self._write(tmp_path, "edges.svg", svg)
+        issues = [
+            Issue(
+                type="rect_viewbox",
+                text="a",
+                direction="viewbox+right",
+                svg={"x": 0, "y": 0, "w": 110, "h": 40},
+                parent={},
+                fix={"expand_viewbox_w": 10, "expand_viewbox_h": 0},
+            ),
+            Issue(
+                type="rect_viewbox",
+                text="b",
+                direction="viewbox+right",
+                svg={"x": 0, "y": 0, "w": 130, "h": 40},
+                parent={},
+                fix={"expand_viewbox_w": 30, "expand_viewbox_h": 0},
+            ),
+        ]
+        fix_svg(svg_path, issues, backup=False)
+        assert 'viewBox="0 0 130 80"' in svg_path.read_text(encoding="utf-8")
+
+    def test_crop_then_expand_keeps_the_old_right_edge(self, tmp_path):
+        # Crop moves the origin. The expand delta was measured past the
+        # original right edge (400), so the new right edge is 450, not
+        # crop_width + 50.
+        svg = '<svg viewBox="0 0 400 300" width="400" height="300"/>'
+        svg_path = self._write(tmp_path, "crop-expand.svg", svg)
+        misfit = Issue(
+            type="content_misfit",
+            text="content",
+            direction="viewbox+oversized",
+            svg={"x": 10, "y": 10, "w": 90, "h": 50},
+            parent={},
+            fix={"crop_x": 2, "crop_y": 2, "crop_w": 106, "crop_h": 66},
+        )
+        overflow = Issue(
+            type="rect_viewbox",
+            text="past",
+            direction="viewbox+right",
+            svg={"x": 360, "y": 10, "w": 90, "h": 40},
+            parent={},
+            fix={"expand_viewbox_w": 50, "expand_viewbox_h": 0},
+        )
+        changes = fix_svg(svg_path, [misfit, overflow], backup=False)
+        assert any("extended after crop" in c for c in changes), changes
+        # origin stays at the crop; right edge is 400 + 50 = 450.
+        assert 'viewBox="2 2 448 66"' in svg_path.read_text(encoding="utf-8")
 
     def test_grouped_issues_collapse_to_one_change(self, tmp_path):
         # Two text_rect issues hitting the SAME rect must produce a single

@@ -172,6 +172,32 @@ class TestCheckSvg:
         assert issue.fix.get("expand_w", 0) == 0
         assert issue.fix.get("expand_h", 0) == 0
 
+    def test_translated_group_stays_fixable(self, page):
+        # translate() does not change how width grows. A wrapper group must
+        # not mark the card unfixable.
+        result = check_svg(page, FIXTURES / "translated_card_overflow.svg")
+        text_rects = [i for i in result.issues if i.type == "text_rect"]
+        assert text_rects, (
+            f"translated card overflow missed: "
+            f"{[(i.type, i.direction) for i in result.issues]}"
+        )
+        issue = text_rects[0]
+        assert issue.fix.get("transformed") is False
+        assert issue.fix.get("fixable") is True
+        assert issue.fix.get("expand_w", 0) > 0
+
+    def test_scaled_group_stays_unfixable(self, page):
+        result = check_svg(page, FIXTURES / "scaled_card_overflow.svg")
+        text_rects = [i for i in result.issues if i.type == "text_rect"]
+        assert text_rects, (
+            f"scaled card overflow missed: "
+            f"{[(i.type, i.direction) for i in result.issues]}"
+        )
+        issue = text_rects[0]
+        assert issue.fix.get("transformed") is True
+        assert issue.fix.get("fixable") is False
+        assert issue.fix.get("expand_w", 0) == 0
+
     def test_background_rect_does_not_hide_card_overflow(self, page):
         # A full-canvas plate is drawn first, and the label is wider than its
         # card, so the bbox center falls outside the card and inside the

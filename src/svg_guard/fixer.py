@@ -41,16 +41,15 @@ def fix_svg(
         _safe_backup(svg_path)
 
     # Fix viewBox overflow first (changes the canvas, not individual elements).
-    # Both rect_viewbox and text_viewbox (orphan text) widen the canvas, so we
-    # accumulate their deltas and apply them together to avoid repeated edits.
+    # Both rect_viewbox and text_viewbox (orphan text) widen the canvas.
+    # Deltas on the same edge collapse to the larger one.
 
-    # content_misfit (Phase 3): the drawing occupies a tiny off-center slice of
-    # the viewBox. Crop the viewBox to the content bbox BEFORE any other fix —
-    # the crop establishes the new coordinate baseline, and the checker emits
-    # absolute crop coords (not deltas) so this is independent of the
-    # expand_viewbox path below. Only one content_misfit is expected per file;
-    # if several appear, the first wins and the rest are dropped (their crop
-    # coords describe the same pre-crop geometry, so re-applying would be wrong).
+    # content_misfit (Phase 3) crops the viewBox onto the content. Expand
+    # deltas were measured against the pre-crop edge, so remember that edge
+    # and, after a successful crop, push the new right/bottom out to
+    # old_edge + delta instead of adding the delta to the cropped size.
+    old_vb = _read_viewbox(content)
+    cropped = False
     for issue in issues:
         if issue.type != "content_misfit":
             continue
@@ -66,6 +65,7 @@ def fix_svg(
         )
         if change:
             changes.append(change)
+            cropped = change.startswith("viewBox cropped to")
         break  # first content_misfit establishes the cropped baseline
 
     vb_dw, vb_dh = 0.0, 0.0
@@ -81,11 +81,15 @@ def fix_svg(
                 f"left/top overflow needs manual repositioning"
             )
             continue
-        vb_dw += dw
-        vb_dh += dh
+        # Two cards past the same edge need the larger delta, not the sum.
+        vb_dw = max(vb_dw, float(dw))
+        vb_dh = max(vb_dh, float(dh))
 
     if vb_dw > 0 or vb_dh > 0:
-        content, change = _expand_viewbox(content, vb_dw, vb_dh)
+        if cropped and old_vb is not None:
+            content, change = _extend_cropped_viewbox(content, old_vb, vb_dw, vb_dh)
+        else:
+            content, change = _expand_viewbox(content, vb_dw, vb_dh)
         if change:
             changes.append(change)
 
@@ -277,6 +281,58 @@ def _parse_len(value: str, ref_px: float = _DEFAULT_FONT_PX) -> float | None:
     if unit == "em":
         return num * ref_px
     return num  # bare number or px
+
+
+def _read_viewbox(content: str) -> tuple[float, float, float, float] | None:
+    """Return the first viewBox as (x, y, w, h), or None if it can't be parsed."""
+    match = re.search(
+        r'viewBox\s*=\s*"([^"]*)"|viewBox\s*=\s*\'([^\']*)\'',
+        content,
+    )
+    if not match:
+        return None
+    inner = match.group(1) if match.group(1) is not None else match.group(2)
+    parts = inner.split()
+    if len(parts) != 4:
+        return None
+    try:
+        x, y, w, h = (float(part) for part in parts)
+    except ValueError:
+        return None
+    return x, y, w, h
+
+
+def _extend_cropped_viewbox(
+    content: str,
+    old: tuple[float, float, float, float],
+    delta_w: float,
+    delta_h: float,
+) -> tuple[str, str | None]:
+    """Keep overflow that a crop clamped away.
+
+    ``delta_*`` is how far geometry passed the pre-crop right/bottom edge.
+    The cropped viewBox keeps its new origin. Its right/bottom moves out to
+    at least ``old_edge + delta``, which is where that geometry ends.
+    """
+    current = _read_viewbox(content)
+    if current is None:
+        return _expand_viewbox(content, delta_w, delta_h)
+    ox, oy, ow, oh = old
+    cx, cy, cw, ch = current
+    right = cx + cw
+    bottom = cy + ch
+    if delta_w > 0:
+        right = max(right, ox + ow + delta_w)
+    if delta_h > 0:
+        bottom = max(bottom, oy + oh + delta_h)
+    new_w = right - cx
+    new_h = bottom - cy
+    if new_w <= cw + 0.5 and new_h <= ch + 0.5:
+        return content, None
+    updated, change = _crop_viewbox(content, cx, cy, new_w, new_h)
+    if not change or not change.startswith("viewBox cropped to"):
+        return updated, change
+    return updated, f"viewBox extended after crop to {new_w:.0f}x{new_h:.0f}"
 
 
 def _expand_viewbox(
@@ -481,7 +537,7 @@ def _dim_msg(axis: str, delta: float, mode: str) -> str:
         return f"+{delta:.0f}{axis}"
     if mode == "inject":
         return f"{axis} (injected)"
-    return f"{axis} (skipped)"
+    return f"{axis} (unchanged)"
 
 
 def _sync_inner_label_px(

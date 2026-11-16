@@ -120,6 +120,23 @@ JS_DETECT = r"""
     return rootUserFromViewport(px, py);
   }
 
+  // width/height live in local user units. Editing them grows the rendered
+  // box by the same amount only when the cumulative transform is a pure
+  // translation (draw.io's translate(0.5,0.5) wrappers included). Scale,
+  // rotate and skew stay unfixable: the measured delta is in root user
+  // space and would be written into the wrong frame.
+  function mapsAsTranslation(el) {
+    if (!el.getCTM()) {
+      return !(el.getAttribute('transform') || el.closest('[transform]'));
+    }
+    const origin = localToUser(el, 0, 0);
+    const ux = localToUser(el, 1, 0);
+    const uy = localToUser(el, 0, 1);
+    const eps = 0.01;
+    return Math.abs(ux.x - origin.x - 1) < eps && Math.abs(ux.y - origin.y) < eps
+        && Math.abs(uy.x - origin.x) < eps && Math.abs(uy.y - origin.y - 1) < eps;
+  }
+
   // getUserBox(el): axis-aligned box in the ROOT svg's user space (viewBox
   // coordinates), including transforms on the element and its ancestors.
   function getUserBox(el) {
@@ -161,16 +178,10 @@ JS_DETECT = r"""
         fill: rect.getAttribute('fill') || '',
         class: rect.getAttribute('class') || ''
       },
-      // A rect carrying a transform (or inside a transformed <g>) can't be
-      // auto-fixed by editing its width/height attributes: those live in the
-      // pre-transform local space, so adding N to width doesn't grow the
-      // rendered (post-transform) box by N. The checker measures everything
-      // in post-transform viewBox space, so the emitted expand deltas would
-      // be applied to the wrong coordinate frame and the fix would silently
-      // under- or over-shoot. Flag such rects so the fixer skips them with a
-      // clear message instead of writing a wrong width.
-      transformed: !!(rect.getAttribute('transform')
-        || (rect.closest('[transform]') !== null))
+      // Scale, rotate and skew: width/height are pre-transform, the measured
+      // delta is post-transform. Pure translation still grows 1:1, so those
+      // cards stay fixable. See mapsAsTranslation.
+      transformed: !mapsAsTranslation(rect)
     });
   }
 
@@ -417,8 +428,7 @@ JS_DETECT = r"""
       w: foBox.w + over.left + over.right,
       h: foBox.h + over.top + over.bottom
     };
-    const transformed = !!(fo.getAttribute('transform')
-      || (fo.closest('[transform]') !== null));
+    const transformed = !mapsAsTranslation(fo);
     const foreign = {
       domIndex: fi,
       transformed: transformed,

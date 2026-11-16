@@ -163,6 +163,19 @@ class TestFixTransformedRect:
         assert svg_path.read_text(encoding="utf-8") == original
 
 
+class TestFixTranslatedCard:
+    def test_translated_card_widens(self, page, tmp_path):
+        svg_path = _copy_fixture("translated_card_overflow.svg", tmp_path)
+        result = check_svg(page, svg_path)
+        changes = fix_svg(svg_path, result.issues, backup=False)
+        assert any("width" in c and "skipped" not in c for c in changes), changes
+        assert 'width="100"' not in svg_path.read_text(encoding="utf-8")
+        result2 = check_svg(page, svg_path)
+        assert all(
+            "right" not in i.direction for i in result2.issues if i.type == "text_rect"
+        ), result2.issues
+
+
 class TestFixForeignObject:
     def test_clipped_html_widens_foreign_object(self, page, tmp_path):
         svg_path = _copy_fixture("foreign_overflow.svg", tmp_path)
